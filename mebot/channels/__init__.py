@@ -1,6 +1,5 @@
-"""Chat channels module with plugin architecture."""
+"""Mezon channel module."""
 
-from mebot.channels.base import BaseChannel
 from mebot.channels.manager import ChannelManager
 
-__all__ = ["BaseChannel", "ChannelManager"]
+__all__ = ["ChannelManager"]

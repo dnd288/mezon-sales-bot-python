@@ -1,89 +1,47 @@
-"""Channel manager for coordinating chat channels."""
+"""Channel manager for the Mezon channel."""
 
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 from loguru import logger
 
-from mebot.bus.events import OutboundMessage
 from mebot.bus.queue import MessageBus
-from mebot.channels.base import BaseChannel
+from mebot.channels.mezon import MezonChannel
 from mebot.config.schema import Config
 
 
 class ChannelManager:
-    """
-    Manages chat channels and coordinates message routing.
-
-    Responsibilities:
-    - Initialize enabled channels (Telegram, WhatsApp, etc.)
-    - Start/stop channels
-    - Route outbound messages
-    """
+    """Manages the Mezon channel and routes outbound messages."""
 
     def __init__(self, config: Config, bus: MessageBus):
         self.config = config
         self.bus = bus
-        self.channels: dict[str, BaseChannel] = {}
+        self._channel: MezonChannel | None = None
         self._dispatch_task: asyncio.Task | None = None
 
-        self._init_channels()
+        if config.channels.mezon.enabled:
+            self._channel = MezonChannel(config.channels.mezon, bus)
+            logger.info("Mezon channel enabled")
+        else:
+            logger.warning("Mezon channel is disabled")
 
-    def _init_channels(self) -> None:
-        """Initialize channels based on config."""
-
-        # Mezon channel
-        if self.config.channels.mezon.enabled:
-            try:
-                from mebot.channels.mezon import MezonChannel
-                self.channels["mezon"] = MezonChannel(
-                    self.config.channels.mezon,
-                    self.bus,
-                )
-                logger.info("Mezon channel enabled")
-            except ImportError as e:
-                logger.warning(f"Mezon channel not available: {e}")
-
-    def _validate_allow_from(self) -> None:
-        for name, ch in self.channels.items():
-            if getattr(ch.config, "allow_from", None) == []:
-                raise SystemExit(
-                    f'Error: "{name}" has empty allowFrom (denies all). '
-                    f'Set ["*"] to allow everyone, or add specific user IDs.'
-                )
-    
-    async def _start_channel(self, name: str, channel: BaseChannel) -> None:
-        """Start a channel and log any exceptions."""
-        try:
-            await channel.start()
-        except Exception as e:
-            logger.error("Failed to start channel {}: {}", name, e)
+    @property
+    def enabled_channels(self) -> list[str]:
+        return ["mezon"] if self._channel else []
 
     async def start_all(self) -> None:
-        """Start all channels and the outbound dispatcher."""
-        if not self.channels:
+        if not self._channel:
             logger.warning("No channels enabled")
             return
 
-        # Start outbound dispatcher
         self._dispatch_task = asyncio.create_task(self._dispatch_outbound())
-
-        # Start channels
-        tasks = []
-        for name, channel in self.channels.items():
-            logger.info("Starting {} channel...", name)
-            tasks.append(asyncio.create_task(self._start_channel(name, channel)))
-
-        # Wait for all to complete (they should run forever)
-        await asyncio.gather(*tasks, return_exceptions=True)
+        logger.info("Starting mezon channel...")
+        await self._channel.start()
 
     async def stop_all(self) -> None:
-        """Stop all channels and the dispatcher."""
-        logger.info("Stopping all channels...")
+        logger.info("Stopping mezon channel...")
 
-        # Stop dispatcher
         if self._dispatch_task:
             self._dispatch_task.cancel()
             try:
@@ -91,24 +49,20 @@ class ChannelManager:
             except asyncio.CancelledError:
                 pass
 
-        # Stop all channels
-        for name, channel in self.channels.items():
+        if self._channel:
             try:
-                await channel.stop()
-                logger.info("Stopped {} channel", name)
+                await self._channel.stop()
+                logger.info("Mezon channel stopped")
             except Exception as e:
-                logger.error("Error stopping {}: {}", name, e)
+                logger.error("Error stopping mezon channel: {}", e)
 
     async def _dispatch_outbound(self) -> None:
-        """Dispatch outbound messages to the appropriate channel."""
+        """Forward outbound messages from the bus to the Mezon channel."""
         logger.info("Outbound dispatcher started")
 
         while True:
             try:
-                msg = await asyncio.wait_for(
-                    self.bus.consume_outbound(),
-                    timeout=1.0
-                )
+                msg = await asyncio.wait_for(self.bus.consume_outbound(), timeout=1.0)
 
                 if msg.metadata.get("_progress"):
                     if msg.metadata.get("_tool_hint") and not self.config.channels.send_tool_hints:
@@ -116,12 +70,11 @@ class ChannelManager:
                     if not msg.metadata.get("_tool_hint") and not self.config.channels.send_progress:
                         continue
 
-                channel = self.channels.get(msg.channel)
-                if channel:
+                if self._channel and msg.channel == "mezon":
                     try:
-                        await channel.send(msg)
+                        await self._channel.send(msg)
                     except Exception as e:
-                        logger.error("Error sending to {}: {}", msg.channel, e)
+                        logger.error("Error sending to mezon: {}", e)
                 else:
                     logger.warning("Unknown channel: {}", msg.channel)
 
@@ -129,22 +82,3 @@ class ChannelManager:
                 continue
             except asyncio.CancelledError:
                 break
-
-    def get_channel(self, name: str) -> BaseChannel | None:
-        """Get a channel by name."""
-        return self.channels.get(name)
-
-    def get_status(self) -> dict[str, Any]:
-        """Get status of all channels."""
-        return {
-            name: {
-                "enabled": True,
-                "running": channel.is_running
-            }
-            for name, channel in self.channels.items()
-        }
-
-    @property
-    def enabled_channels(self) -> list[str]:
-        """Get list of enabled channel names."""
-        return list(self.channels.keys())

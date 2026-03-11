@@ -6,11 +6,11 @@ import asyncio
 import json
 from abc import ABC, abstractmethod
 from typing import Any, List
+
 from loguru import logger
 
-from mebot.bus.events import OutboundMessage
+from mebot.bus.events import InboundMessage, OutboundMessage
 from mebot.bus.queue import MessageBus
-from mebot.channels.base import BaseChannel
 from mebot.config.schema import MezonConfig
 
 
@@ -83,25 +83,19 @@ class HandlerManager:
         """Check if sender is allowed based on allow_from list."""
         if not self.allow_from:
             return True  # No restrictions
-
-        # Convert sender_id to string for comparison
-        sender_id_str = str(sender_id)
-        return sender_id_str in self.allow_from
+        return str(sender_id) in self.allow_from
 
     async def handle_message(self, message: Any) -> None:
         """Route an incoming message to the appropriate handler."""
         try:
-            # Filter out self-sent messages
             if getattr(message, "sender_id", "") == self.client_id:
                 return
 
-            # Check if sender is allowed
             sender_id = getattr(message, "sender_id", "")
             if not self._is_sender_allowed(sender_id):
                 logger.debug(f"Sender {sender_id} not in allow_from list, ignoring message")
                 return
 
-            # Parse message content
             raw_content = getattr(message, "content", None)
             content = ""
             if raw_content:
@@ -116,7 +110,6 @@ class HandlerManager:
             if not content.strip():
                 return
 
-            # Route to appropriate handler
             for handler in self.handlers:
                 if handler.should_handle(content):
                     logger.info(f"Routing to {handler.__class__.__name__} for command: {handler.get_command()}")
@@ -137,13 +130,12 @@ class DefaultHandler(BaseMessageHandler):
         return True
 
     async def handle(self, message: Any, content: str) -> None:
-        """Handle the message by logging it (default behavior)."""
         sender_id = getattr(message, "sender_id", "")
         channel_id = getattr(message, "channel_id", "")
         logger.debug(f"Default handler processing message from {sender_id} in {channel_id}: {content[:60]}...")
 
 
-class MezonChannel(BaseChannel):
+class MezonChannel:
     """
     Mezon channel using mezon-sdk WebSocket connection with handler-based architecture.
 
@@ -153,13 +145,54 @@ class MezonChannel(BaseChannel):
     name = "mezon"
 
     def __init__(self, config: MezonConfig, bus: MessageBus):
-        super().__init__(config, bus)
-        self.config: MezonConfig = config
+        self.config = config
+        self.bus = bus
+        self._running = False
         self._client = None
         self.handler_manager = HandlerManager(str(config.client_id), config.allow_from)
 
-        # Register default handler
         self.handler_manager.register_handler(DefaultHandler(str(config.client_id)))
+
+    def is_allowed(self, sender_id: str) -> bool:
+        """Check if sender is permitted. Empty list → allow all; specific list → filter."""
+        allow_list = self.config.allow_from
+        if not allow_list:
+            return True
+        if "*" in allow_list:
+            return True
+        return str(sender_id) in allow_list
+
+    async def _handle_message(
+        self,
+        sender_id: str,
+        chat_id: str,
+        content: str,
+        media: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        session_key: str | None = None,
+    ) -> None:
+        """Publish an inbound message to the bus."""
+        if not self.is_allowed(sender_id):
+            logger.warning(
+                "Access denied for sender {} on mezon channel. "
+                "Add them to allowFrom list in config to grant access.",
+                sender_id,
+            )
+            return
+
+        await self.bus.publish_inbound(InboundMessage(
+            channel=self.name,
+            sender_id=str(sender_id),
+            chat_id=str(chat_id),
+            content=content,
+            media=media or [],
+            metadata=metadata or {},
+            session_key_override=session_key,
+        ))
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
 
     async def start(self) -> None:
         """Start the Mezon bot connection."""
@@ -181,8 +214,6 @@ class MezonChannel(BaseChannel):
 
                 self._client.on_channel_message(self._on_message)
 
-                # The ZK proof step in login() is for token transfers only (not needed
-                # for basic messaging) and may fail for bot accounts. Skip it safely.
                 async def _skip_zk_proof() -> None:
                     return None  # type: ignore[return-value]
 
@@ -193,16 +224,13 @@ class MezonChannel(BaseChannel):
                 logger.info(f"Mezon bot connected (client_id={self.config.client_id})")
                 logger.info(f"Registered {len(self.handler_manager.handlers)} message handlers")
 
-                # Log allow_from settings
                 if self.handler_manager.allow_from:
                     logger.info(f"Allow_from filter enabled for {len(self.handler_manager.allow_from)} users")
                 else:
                     logger.info("Allow_from filter disabled (accepting messages from all users)")
 
-                # Keep alive — SDK maintains the connection via internal tasks
                 while self._running:
                     await asyncio.sleep(5)
-                    # If SDK exhausted its reconnect retries, restart from scratch
                     if self._client and not await self._client.socket_manager.is_connected():
                         logger.warning("Mezon socket lost, restarting connection...")
                         break
@@ -244,23 +272,19 @@ class MezonChannel(BaseChannel):
             logger.error(f"Error sending Mezon message to {msg.chat_id}: {e}")
 
     async def _on_message(self, message) -> None:
-        """Handle an incoming Mezon channel message using the handler manager."""
+        """Handle an incoming Mezon channel message."""
         try:
-            # Use handler manager to route the message
             await self.handler_manager.handle_message(message)
 
-            # Also forward to the bus for existing mebot functionality
             sender_id = str(getattr(message, "sender_id", "") or "")
             channel_id = str(getattr(message, "channel_id", "") or "")
 
             if not sender_id or not channel_id:
                 return
 
-            # Ignore messages from the bot itself
             if sender_id == str(self.config.client_id):
                 return
 
-            # Parse message content (JSON {"t": "text", ...})
             raw_content = getattr(message, "content", None)
             content = ""
             if raw_content:
