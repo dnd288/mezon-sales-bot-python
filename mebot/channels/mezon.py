@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from abc import ABC, abstractmethod
 from typing import Any, List
 
@@ -32,6 +33,37 @@ def _split_message(content: str, max_len: int = 2000) -> list[str]:
         chunks.append(content[:pos])
         content = content[pos:].lstrip()
     return chunks
+
+
+def _extract_message_text(raw_content: Any) -> str:
+    """Extract text from Mezon message content across dict/object/string payloads."""
+    if raw_content is None:
+        return ""
+
+    if isinstance(raw_content, dict):
+        return str(raw_content.get("t") or "")
+
+    if hasattr(raw_content, "t"):
+        try:
+            return str(getattr(raw_content, "t") or "")
+        except Exception:
+            pass
+
+    if isinstance(raw_content, (bytes, bytearray)):
+        try:
+            raw_content = raw_content.decode("utf-8")
+        except Exception:
+            return ""
+
+    if isinstance(raw_content, str):
+        try:
+            data = json.loads(raw_content)
+            if isinstance(data, dict):
+                return str(data.get("t") or "")
+        except json.JSONDecodeError:
+            return raw_content
+
+    return str(raw_content)
 
 
 class BaseMessageHandler(ABC):
@@ -101,16 +133,7 @@ class HandlerManager:
                 logger.debug(f"Message from sender={getattr(message, 'sender_id', '')} clan={getattr(message, 'clan_id', '')} channel={getattr(message, 'channel_id', '')} blocked by allow_from filter")
                 return
 
-            raw_content = getattr(message, "content", None)
-            content = ""
-            if raw_content:
-                try:
-                    if isinstance(raw_content, (bytes, bytearray)):
-                        raw_content = raw_content.decode("utf-8")
-                    data = json.loads(raw_content)
-                    content = data.get("t") or ""
-                except (json.JSONDecodeError, AttributeError, UnicodeDecodeError):
-                    content = str(raw_content)
+            content = _extract_message_text(getattr(message, "content", None))
 
             if not content.strip():
                 return
@@ -316,18 +339,12 @@ class MezonChannel:
             )
             is_public = getattr(message, "is_public", True)
 
-            raw_content = getattr(message, "content", None)
-            content = ""
-            if raw_content:
-                try:
-                    if isinstance(raw_content, (bytes, bytearray)):
-                        raw_content = raw_content.decode("utf-8")
-                    data = json.loads(raw_content)
-                    content = data.get("t") or ""
-                except (json.JSONDecodeError, AttributeError, UnicodeDecodeError):
-                    content = str(raw_content)
+            content = _extract_message_text(getattr(message, "content", None))
 
             if not content.strip():
+                return
+
+            if not self._should_respond_to_message(message, content):
                 return
 
             self._start_typing(channel_id, int(clan_id) if clan_id else 0, mode, is_public)
@@ -397,6 +414,60 @@ class MezonChannel:
             return int(message_mode) if message_mode is not None else 2
         except (TypeError, ValueError):
             return 2
+
+    def _should_respond_to_message(self, message: Any, content: str) -> bool:
+        """Apply mention-only gate when enabled."""
+        if not self.config.mention_only:
+            return True
+
+        bot_id = str(self.config.client_id or "")
+        bot_username = (self.config.bot_username or "").strip().lstrip("@").lower()
+
+        mentions = self._normalize_mentions(getattr(message, "mentions", None))
+        for mention in mentions:
+            user_id = self._mention_value(mention, "user_id")
+            if user_id is not None and str(user_id) == bot_id:
+                return True
+            username = self._mention_value(mention, "username")
+            if bot_username and isinstance(username, str) and username.strip().lstrip("@").lower() == bot_username:
+                return True
+
+        # Fallback for plain-text mentions when mentions array is missing/incomplete.
+        if bot_id and re.search(rf"<@!?{re.escape(bot_id)}>", content):
+            return True
+        if bot_username and re.search(rf"(?<!\w)@?{re.escape(bot_username)}(?!\w)", content, re.IGNORECASE):
+            return True
+
+        logger.debug("Ignoring message in mention_only mode: no direct mention detected")
+        return False
+
+    @staticmethod
+    def _normalize_mentions(raw_mentions: Any) -> list[Any]:
+        """Best-effort normalization for incoming `mentions` payload variants."""
+        if raw_mentions is None:
+            return []
+        if isinstance(raw_mentions, (bytes, bytearray)):
+            try:
+                raw_mentions = raw_mentions.decode("utf-8")
+            except Exception:
+                return []
+        if isinstance(raw_mentions, str):
+            try:
+                raw_mentions = json.loads(raw_mentions)
+            except json.JSONDecodeError:
+                return []
+        if isinstance(raw_mentions, dict):
+            return [raw_mentions]
+        if isinstance(raw_mentions, list):
+            return raw_mentions
+        return []
+
+    @staticmethod
+    def _mention_value(mention: Any, key: str) -> Any:
+        """Read mention field from object or dict."""
+        if isinstance(mention, dict):
+            return mention.get(key)
+        return getattr(mention, key, None)
 
     def _start_typing(self, channel_id: str, clan_id: int, mode: int, is_public: bool) -> None:
         """Start typing indicator loop for a channel (no-op if already running)."""

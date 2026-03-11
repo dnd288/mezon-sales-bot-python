@@ -33,7 +33,7 @@ dependencies = [
     "mcp>=1.26.0,<2.0.0",
     "json-repair>=0.57.0,<1.0.0",
     "openai>=2.8.0,<3.0.0",
-    "mezon-sdk>=1.6.19",
+    "mezon-sdk>=1.6.20",
 ]
 
 [project.optional-dependencies]

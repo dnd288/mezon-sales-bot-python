@@ -45,6 +45,7 @@ class AgentLoop:
     """
 
     _TOOL_RESULT_MAX_CHARS = 500
+    _GENERIC_LLM_PROVIDER_ERROR = "Có lỗi xảy ra với LLM Provider. Vui lòng thử lại sau."
 
     def __init__(
         self,
@@ -238,7 +239,7 @@ class AgentLoop:
                 # poison the context and cause permanent 400 loops (#1303).
                 if response.finish_reason == "error":
                     logger.error("LLM returned error: {}", (clean or "")[:200])
-                    final_content = clean or "Sorry, I encountered an error calling the AI model."
+                    final_content = self._GENERIC_LLM_PROVIDER_ERROR
                     break
                 messages = self.context.add_assistant_message(
                     messages, clean, reasoning_content=response.reasoning_content,

@@ -86,6 +86,22 @@ class TestMessageToolSuppressLogic:
         assert result is not None
         assert "Hello" in result.content
 
+    @pytest.mark.asyncio
+    async def test_provider_error_returns_generic_message(self, tmp_path: Path) -> None:
+        loop = _make_loop(tmp_path)
+        loop.provider.chat = AsyncMock(return_value=LLMResponse(
+            content="Error calling LLM: <!doctype html><html>blocked</html>",
+            tool_calls=[],
+            finish_reason="error",
+        ))
+        loop.tools.get_definitions = MagicMock(return_value=[])
+
+        msg = InboundMessage(channel="feishu", sender_id="user1", chat_id="chat123", content="Hi")
+        result = await loop._process_message(msg)
+
+        assert result is not None
+        assert result.content == AgentLoop._GENERIC_LLM_PROVIDER_ERROR
+
     async def test_progress_hides_internal_reasoning(self, tmp_path: Path) -> None:
         loop = _make_loop(tmp_path)
         tool_call = ToolCallRequest(id="call1", name="read_file", arguments={"path": "foo.txt"})

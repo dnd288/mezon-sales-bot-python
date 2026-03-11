@@ -55,6 +55,10 @@ class LLMProvider(ABC):
         "server error",
         "temporarily unavailable",
     )
+    _HTML_ERROR_MARKERS = (
+        "<!doctype html",
+        "<html",
+    )
 
     def __init__(self, api_key: str | None = None, api_base: str | None = None):
         self.api_key = api_key
@@ -148,6 +152,10 @@ class LLMProvider(ABC):
     @classmethod
     def _is_transient_error(cls, content: str | None) -> bool:
         err = (content or "").lower()
+        # HTML error pages (Cloudflare, gateway block pages, misrouted endpoints)
+        # are configuration/network issues and should not be retried blindly.
+        if any(marker in err for marker in cls._HTML_ERROR_MARKERS):
+            return False
         return any(marker in err for marker in cls._TRANSIENT_ERROR_MARKERS)
 
     async def chat_with_retry(
