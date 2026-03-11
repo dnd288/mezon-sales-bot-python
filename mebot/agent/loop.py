@@ -25,7 +25,7 @@ from mebot.agent.tools.web import WebFetchTool, WebSearchTool
 from mebot.bus.events import InboundMessage, OutboundMessage
 from mebot.bus.queue import MessageBus
 from mebot.providers.base import LLMProvider
-from mebot.session.manager import Session, SessionManager
+from mebot.session.manager import Session, SessionManager, SessionStore
 
 if TYPE_CHECKING:
     from mebot.config.schema import ChannelsConfig, ExecToolConfig
@@ -63,7 +63,7 @@ class AgentLoop:
         exec_config: ExecToolConfig | None = None,
         cron_service: CronService | None = None,
         restrict_to_workspace: bool = False,
-        session_manager: SessionManager | None = None,
+        session_manager: SessionStore | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
     ):

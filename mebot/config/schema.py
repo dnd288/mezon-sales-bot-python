@@ -107,6 +107,36 @@ class GatewayConfig(Base):
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
 
 
+class RedisStreamsConfig(Base):
+    """Redis Streams bridge config."""
+
+    inbound_stream: str = "mebot:inbound"
+    events_stream: str = "mezon:events"
+    consumer_group: str = "mebot-workers"
+    consumer_name: str = "mebot-1"
+    api_key: str = ""
+    forward_events: list[str] = Field(default_factory=list)
+    max_len: int = 10000
+
+
+class RedisSessionConfig(Base):
+    """Redis-backed session storage config."""
+
+    enabled: bool = False
+    ttl_days: int = 30
+    key_prefix: str = "mebot:session"
+
+
+class RedisConfig(Base):
+    """Redis integration config."""
+
+    enabled: bool = False
+    url: str = "redis://localhost:6379/0"
+    password: str = ""
+    streams: RedisStreamsConfig = Field(default_factory=RedisStreamsConfig)
+    session: RedisSessionConfig = Field(default_factory=RedisSessionConfig)
+
+
 class WebSearchConfig(Base):
     """Web search tool configuration."""
 
@@ -158,6 +188,7 @@ class Config(BaseSettings):
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
+    redis: RedisConfig = Field(default_factory=RedisConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
 
     @property

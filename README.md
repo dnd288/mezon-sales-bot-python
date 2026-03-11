@@ -10,12 +10,14 @@ AI sales bot for the [Mezon](https://mezon.ai) platform, built on the `mebot` ag
 - Cron scheduling and heartbeat service
 - MCP (Model Context Protocol) tool support
 - CLI for direct agent interaction and gateway server mode
+- Optional Redis integration: Streams bridge for external triggers (n8n, webhooks) and Redis-backed session storage with TTL
 
 ## Requirements
 
 - Python 3.11+
 - A Mezon bot account (`client_id` + `token`)
 - An LLM API key (e.g. OpenRouter, Anthropic)
+- Redis 7+ (optional — for Streams bridge and/or session storage)
 
 ## Installation
 
@@ -78,13 +80,34 @@ mebot status
 mebot channels status
 ```
 
+## Redis Integration (optional)
+
+Enable Redis in `~/.mebot/config.json`:
+
+```json
+{
+  "redis": {
+    "enabled": true,
+    "url": "redis://localhost:6379/0",
+    "session": { "enabled": true, "ttlDays": 30 },
+    "streams": { "apiKey": "your-secret", "forwardEvents": ["channel_message"] }
+  }
+}
+```
+
+- **Streams bridge:** External services push to `mebot:inbound` stream; Mezon events forwarded to `mezon:events` stream
+- **Session storage:** Sessions stored in Redis hashes+lists with configurable TTL (fallback: disk JSONL)
+- **Migration:** `mebot session migrate` converts disk sessions to Redis
+
+If `redis.enabled` is `false` or Redis is unreachable, the bot falls back to disk sessions automatically.
+
 ## Docker
 
 ```bash
 docker compose up -d mebot-gateway
 ```
 
-Config is mounted from `~/.mebot` on the host.
+Config is mounted from `~/.mebot` on the host. Docker Compose includes a Redis service by default.
 
 ## Project Structure
 

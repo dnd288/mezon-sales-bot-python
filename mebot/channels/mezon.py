@@ -172,9 +172,10 @@ class MezonChannel:
 
     name = "mezon"
 
-    def __init__(self, config: MezonConfig, bus: MessageBus):
+    def __init__(self, config: MezonConfig, bus: MessageBus, event_forwarder: Any | None = None):
         self.config = config
         self.bus = bus
+        self._event_forwarder = event_forwarder
         self._running = False
         self._client = None
         self._typing_tasks: dict[str, asyncio.Task] = {}
@@ -255,6 +256,11 @@ class MezonChannel:
                 logger.info("Connecting to Mezon...")
                 await self._client.login(enable_auto_reconnect=True)
                 logger.info(f"Mezon bot connected (client_id={self.config.client_id})")
+                if self._event_forwarder and hasattr(self._event_forwarder, "setup_event_forwarding"):
+                    try:
+                        await self._event_forwarder.setup_event_forwarding(self._client)
+                    except Exception as e:
+                        logger.warning(f"Failed to setup Redis event forwarding: {e}")
 
                 logger.info(f"Registered {len(self.handler_manager.handlers)} message handlers")
 
