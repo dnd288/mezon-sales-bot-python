@@ -5,7 +5,7 @@ import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from loguru import logger
 
@@ -211,3 +211,12 @@ class SessionManager:
                 continue
 
         return sorted(sessions, key=lambda x: x.get("updated_at", ""), reverse=True)
+
+
+class SessionStore(Protocol):
+    """Common session store interface for disk and Redis implementations."""
+
+    def get_or_create(self, key: str) -> Session: ...
+    def save(self, session: Session) -> None: ...
+    def invalidate(self, key: str) -> None: ...
+    def list_sessions(self) -> list[dict[str, Any]]: ...

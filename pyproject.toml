@@ -2,7 +2,7 @@
 name = "mebot-ai"
 version = "0.0.1"
 description = "A lightweight personal AI assistant framework"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 license = {text = "MIT"}
 authors = [
     {name = "mebot contributors"}
@@ -12,8 +12,7 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
 
 dependencies = [
@@ -33,7 +32,8 @@ dependencies = [
     "mcp>=1.26.0,<2.0.0",
     "json-repair>=0.57.0,<1.0.0",
     "openai>=2.8.0,<3.0.0",
-    "mezon-sdk>=1.6.19",
+    "mezon-sdk>=1.6.21",
+    "redis>=5.0.0,<6.0.0",
 ]
 
 [project.optional-dependencies]
@@ -82,7 +82,7 @@ include = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]

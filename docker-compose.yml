@@ -6,11 +6,29 @@ x-common-config: &common-config
     - ~/.mebot:/root/.mebot
 
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: mebot-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
   mebot-gateway:
     container_name: mebot-gateway
     <<: *common-config
     command: ["gateway"]
     restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
     ports:
       - 18790:18790
     deploy:
@@ -29,3 +47,6 @@ services:
     command: ["status"]
     stdin_open: true
     tty: true
+
+volumes:
+  redis_data:

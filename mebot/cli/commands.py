@@ -203,8 +203,8 @@ def onboard():
     console.print("\nNext steps:")
     console.print("  1. Add your API key to [cyan]~/.mebot/config.json[/cyan]")
     console.print("     Get one at: https://openrouter.ai/keys")
-    console.print("  2. Chat: [cyan]mebot agent -m \"Hello!\"[/cyan]")
-    console.print("\n[dim]Want Telegram/WhatsApp? See: https://github.com/HKUDS/mebot#-chat-apps[/dim]")
+    console.print("  2. Configure Mezon bot token in [cyan]channels.mezon[/cyan]")
+    console.print("  3. Start gateway: [cyan]mebot gateway[/cyan]")
 
 
 
@@ -282,11 +282,13 @@ def gateway(
     """Start the mebot gateway."""
     from mebot.agent.loop import AgentLoop
     from mebot.bus.queue import MessageBus
-    from mebot.channels.manager import ChannelManager
+    from mebot.channels.mezon import MezonChannel
+    from mebot.channels.redis_channel import RedisChannel
     from mebot.config.paths import get_cron_dir
     from mebot.cron.service import CronService
     from mebot.cron.types import CronJob
     from mebot.heartbeat.service import HeartbeatService
+    from mebot.session.redis_manager import RedisSessionManager
     from mebot.session.manager import SessionManager
 
     if verbose:
@@ -300,7 +302,34 @@ def gateway(
     sync_workspace_templates(config.workspace_path)
     bus = MessageBus()
     provider = _make_provider(config)
+    redis_stream_ch = None
+    redis_async_client = None
+    redis_sync_client = None
     session_manager = SessionManager(config.workspace_path)
+    if config.redis.enabled:
+        try:
+            import redis
+            import redis.asyncio as redis_async
+
+            redis_kwargs = {"decode_responses": True}
+            if config.redis.password:
+                redis_kwargs["password"] = config.redis.password
+            redis_async_client = redis_async.from_url(config.redis.url, **redis_kwargs)
+            redis_sync_client = redis.Redis.from_url(config.redis.url, **redis_kwargs)
+            redis_sync_client.ping()
+
+            if config.redis.session.enabled:
+                session_manager = RedisSessionManager(redis_sync_client, config.redis.session)
+                console.print("[green]✓[/green] Using Redis session store")
+
+            redis_stream_ch = RedisChannel(config.redis.streams, bus, redis_async_client)
+            console.print("[green]✓[/green] Redis stream bridge configured")
+        except Exception as e:
+            console.print(f"[red]Redis init failed, fallback to disk sessions:[/red] {e}")
+            redis_stream_ch = None
+            redis_async_client = None
+            redis_sync_client = None
+            session_manager = SessionManager(config.workspace_path)
 
     # Create cron service first (callback set after agent creation)
     cron_store_path = get_cron_dir() / "jobs.json"
@@ -368,28 +397,22 @@ def gateway(
         return response
     cron.on_job = on_cron_job
 
-    # Create channel manager
-    channels = ChannelManager(config, bus)
+    # Create Mezon channel
+    mezon_ch = MezonChannel(config.channels.mezon, bus, event_forwarder=redis_stream_ch)
 
     def _pick_heartbeat_target() -> tuple[str, str]:
-        """Pick a routable channel/chat target for heartbeat-triggered messages."""
-        enabled = set(channels.enabled_channels)
-        # Prefer the most recently updated non-internal session on an enabled channel.
+        """Pick the most recent mezon session, or fall back to cli."""
         for item in session_manager.list_sessions():
             key = item.get("key") or ""
             if ":" not in key:
                 continue
             channel, chat_id = key.split(":", 1)
-            if channel in {"cli", "system"}:
-                continue
-            if channel in enabled and chat_id:
+            if channel == "mezon" and chat_id:
                 return channel, chat_id
-        # Fallback keeps prior behavior but remains explicit.
         return "cli", "direct"
 
     # Create heartbeat service
     async def on_heartbeat_execute(tasks: str) -> str:
-        """Phase 2: execute heartbeat tasks through the full agent loop."""
         channel, chat_id = _pick_heartbeat_target()
 
         async def _silent(*_args, **_kwargs):
@@ -404,11 +427,10 @@ def gateway(
         )
 
     async def on_heartbeat_notify(response: str) -> None:
-        """Deliver a heartbeat response to the user's channel."""
         from mebot.bus.events import OutboundMessage
         channel, chat_id = _pick_heartbeat_target()
         if channel == "cli":
-            return  # No external channel available to deliver to
+            return
         await bus.publish_outbound(OutboundMessage(channel=channel, chat_id=chat_id, content=response))
 
     hb_cfg = config.gateway.heartbeat
@@ -422,10 +444,7 @@ def gateway(
         enabled=hb_cfg.enabled,
     )
 
-    if channels.enabled_channels:
-        console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
-    else:
-        console.print("[yellow]Warning: No channels enabled[/yellow]")
+    console.print("[green]✓[/green] Mezon channel ready")
 
     cron_status = cron.status()
     if cron_status["jobs"] > 0:
@@ -433,14 +452,30 @@ def gateway(
 
     console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
 
+    async def _dispatch_outbound() -> None:
+        while True:
+            try:
+                msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+                if msg.metadata.get("_progress"):
+                    if msg.metadata.get("_tool_hint") and not config.channels.send_tool_hints:
+                        continue
+                    if not msg.metadata.get("_tool_hint") and not config.channels.send_progress:
+                        continue
+                await mezon_ch.send(msg)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+
     async def run():
+        dispatch_task = None
         try:
+            if redis_stream_ch:
+                await redis_stream_ch.start()
             await cron.start()
             await heartbeat.start()
-            await asyncio.gather(
-                agent.run(),
-                channels.start_all(),
-            )
+            dispatch_task = asyncio.create_task(_dispatch_outbound())
+            await asyncio.gather(agent.run(), mezon_ch.start(), dispatch_task)
         except KeyboardInterrupt:
             console.print("\nShutting down...")
         finally:
@@ -448,7 +483,23 @@ def gateway(
             heartbeat.stop()
             cron.stop()
             agent.stop()
-            await channels.stop_all()
+            if dispatch_task:
+                dispatch_task.cancel()
+                try:
+                    await dispatch_task
+                except asyncio.CancelledError:
+                    pass
+            if redis_stream_ch:
+                await redis_stream_ch.stop()
+            if redis_async_client:
+                aclose = getattr(redis_async_client, "aclose", None)
+                if callable(aclose):
+                    await aclose()
+                else:
+                    await redis_async_client.close()
+            if redis_sync_client:
+                redis_sync_client.close()
+            await mezon_ch.stop()
 
     asyncio.run(run())
 
@@ -658,16 +709,11 @@ def channels_status():
 
     table = Table(title="Channel Status")
     table.add_column("Channel", style="cyan")
-    table.add_column("Enabled", style="green")
     table.add_column("Configuration", style="yellow")
 
     mz = config.channels.mezon
     mz_config = f"client_id: {mz.client_id[:10]}..." if mz.client_id else "[dim]not configured[/dim]"
-    table.add_row(
-        "Mezon",
-        "✓" if mz.enabled else "✗",
-        mz_config
-    )
+    table.add_row("Mezon", mz_config)
 
     console.print(table)
 
@@ -721,6 +767,9 @@ def status():
 provider_app = typer.Typer(help="Manage providers")
 app.add_typer(provider_app, name="provider")
 
+session_app = typer.Typer(help="Manage sessions")
+app.add_typer(session_app, name="session")
+
 
 _LOGIN_HANDLERS: dict[str, callable] = {}
 
@@ -730,6 +779,38 @@ def _register_login(name: str):
         _LOGIN_HANDLERS[name] = fn
         return fn
     return decorator
+
+
+@session_app.command("migrate")
+def session_migrate(
+    workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
+    config: str | None = typer.Option(None, "--config", "-c", help="Config file path"),
+):
+    """Migrate disk sessions to Redis."""
+    from mebot.session.migrate import migrate_disk_to_redis
+    from mebot.session.redis_manager import RedisSessionManager
+
+    cfg = _load_runtime_config(config, workspace)
+    if not cfg.redis.enabled or not cfg.redis.session.enabled:
+        console.print("[red]Redis session is not enabled in config.[/red]")
+        raise typer.Exit(1)
+
+    try:
+        import redis
+
+        redis_kwargs = {"decode_responses": True}
+        if cfg.redis.password:
+            redis_kwargs["password"] = cfg.redis.password
+        redis_sync_client = redis.Redis.from_url(cfg.redis.url, **redis_kwargs)
+        redis_sync_client.ping()
+    except Exception as e:
+        console.print(f"[red]Failed to connect Redis:[/red] {e}")
+        raise typer.Exit(1)
+
+    manager = RedisSessionManager(redis_sync_client, cfg.redis.session)
+    migrated = migrate_disk_to_redis(cfg.workspace_path / "sessions", manager)
+    console.print(f"[green]✓[/green] Migrated {migrated} session(s) to Redis")
+    redis_sync_client.close()
 
 
 @provider_app.command("login")
