@@ -282,7 +282,7 @@ def gateway(
     """Start the mebot gateway."""
     from mebot.agent.loop import AgentLoop
     from mebot.bus.queue import MessageBus
-    from mebot.channels.manager import ChannelManager
+    from mebot.channels.mezon import MezonChannel
     from mebot.config.paths import get_cron_dir
     from mebot.cron.service import CronService
     from mebot.cron.types import CronJob
@@ -368,28 +368,22 @@ def gateway(
         return response
     cron.on_job = on_cron_job
 
-    # Create channel manager
-    channels = ChannelManager(config, bus)
+    # Create Mezon channel
+    mezon_ch = MezonChannel(config.channels.mezon, bus) if config.channels.mezon.enabled else None
 
     def _pick_heartbeat_target() -> tuple[str, str]:
-        """Pick a routable channel/chat target for heartbeat-triggered messages."""
-        enabled = set(channels.enabled_channels)
-        # Prefer the most recently updated non-internal session on an enabled channel.
+        """Pick the most recent mezon session, or fall back to cli."""
         for item in session_manager.list_sessions():
             key = item.get("key") or ""
             if ":" not in key:
                 continue
             channel, chat_id = key.split(":", 1)
-            if channel in {"cli", "system"}:
-                continue
-            if channel in enabled and chat_id:
+            if channel == "mezon" and chat_id:
                 return channel, chat_id
-        # Fallback keeps prior behavior but remains explicit.
         return "cli", "direct"
 
     # Create heartbeat service
     async def on_heartbeat_execute(tasks: str) -> str:
-        """Phase 2: execute heartbeat tasks through the full agent loop."""
         channel, chat_id = _pick_heartbeat_target()
 
         async def _silent(*_args, **_kwargs):
@@ -404,11 +398,10 @@ def gateway(
         )
 
     async def on_heartbeat_notify(response: str) -> None:
-        """Deliver a heartbeat response to the user's channel."""
         from mebot.bus.events import OutboundMessage
         channel, chat_id = _pick_heartbeat_target()
         if channel == "cli":
-            return  # No external channel available to deliver to
+            return
         await bus.publish_outbound(OutboundMessage(channel=channel, chat_id=chat_id, content=response))
 
     hb_cfg = config.gateway.heartbeat
@@ -422,10 +415,10 @@ def gateway(
         enabled=hb_cfg.enabled,
     )
 
-    if channels.enabled_channels:
-        console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
+    if mezon_ch:
+        console.print("[green]✓[/green] Mezon channel enabled")
     else:
-        console.print("[yellow]Warning: No channels enabled[/yellow]")
+        console.print("[yellow]Warning: Mezon channel disabled[/yellow]")
 
     cron_status = cron.status()
     if cron_status["jobs"] > 0:
@@ -433,14 +426,32 @@ def gateway(
 
     console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
 
+    async def _dispatch_outbound() -> None:
+        while True:
+            try:
+                msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+                if msg.metadata.get("_progress"):
+                    if msg.metadata.get("_tool_hint") and not config.channels.send_tool_hints:
+                        continue
+                    if not msg.metadata.get("_tool_hint") and not config.channels.send_progress:
+                        continue
+                if mezon_ch:
+                    await mezon_ch.send(msg)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+
     async def run():
+        dispatch_task = None
         try:
             await cron.start()
             await heartbeat.start()
-            await asyncio.gather(
-                agent.run(),
-                channels.start_all(),
-            )
+            tasks = [agent.run()]
+            if mezon_ch:
+                dispatch_task = asyncio.create_task(_dispatch_outbound())
+                tasks.append(mezon_ch.start())
+            await asyncio.gather(*tasks)
         except KeyboardInterrupt:
             console.print("\nShutting down...")
         finally:
@@ -448,7 +459,14 @@ def gateway(
             heartbeat.stop()
             cron.stop()
             agent.stop()
-            await channels.stop_all()
+            if dispatch_task:
+                dispatch_task.cancel()
+                try:
+                    await dispatch_task
+                except asyncio.CancelledError:
+                    pass
+            if mezon_ch:
+                await mezon_ch.stop()
 
     asyncio.run(run())
 

@@ -1,5 +1,5 @@
 """Mezon channel module."""
 
-from mebot.channels.manager import ChannelManager
+from mebot.channels.mezon import MezonChannel
 
-__all__ = ["ChannelManager"]
+__all__ = ["MezonChannel"]
