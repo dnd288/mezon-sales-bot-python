@@ -13,7 +13,7 @@ from typing import Any
 
 from loguru import logger
 
-from mebot.bus.events import InboundMessage
+from mebot.bus.events import InboundMessage, OutboundMessage
 from mebot.bus.queue import MessageBus
 from mebot.config.schema import RedisStreamsConfig
 
@@ -130,24 +130,47 @@ class RedisChannel:
                 return
 
             content = str(fields.get("content", "") or "")
-            target = str(fields.get("targetChannelId", "") or "")
+            target_type = str(fields.get("targetType", "channel") or "channel").lower()
+            clan_id = str(fields.get("clanId", "") or "")
+
+            if target_type == "dm":
+                target = str(fields.get("targetUserId", "") or "")
+                if not content or not target:
+                    logger.warning("Redis inbound rejected ({}): missing content/targetUserId for DM", msg_id)
+                    return
+            else:
+                target = str(fields.get("targetChannelId", "") or "")
+                if not content or not target:
+                    logger.warning("Redis inbound rejected ({}): missing content/targetChannelId", msg_id)
+                    return
+
             sender = str(fields.get("senderId", "n8n") or "n8n")
-            if not content or not target:
-                logger.warning("Redis inbound rejected ({}): missing content/targetChannelId", msg_id)
-                return
 
             metadata_raw = fields.get("metadata")
             metadata = self._parse_json_obj(metadata_raw)
             metadata["_redis_stream_id"] = msg_id
+            metadata["target_type"] = target_type
+            if clan_id:
+                metadata["clan_id"] = clan_id
 
-            await self.bus.publish_inbound(InboundMessage(
-                channel="mezon",
-                sender_id=sender,
-                chat_id=target,
-                content=content,
-                metadata=metadata,
-                session_key_override=f"mezon:{target}",
-            ))
+            direct = str(fields.get("directSend", "") or "").lower() in ("1", "true", "yes")
+            if direct:
+                logger.info("RedisChannel direct send to {}:{}", target_type, target)
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel="mezon",
+                    chat_id=target,
+                    content=content,
+                    metadata=metadata,
+                ))
+            else:
+                await self.bus.publish_inbound(InboundMessage(
+                    channel="mezon",
+                    sender_id=sender,
+                    chat_id=target,
+                    content=content,
+                    metadata=metadata,
+                    session_key_override=f"mezon:{target}",
+                ))
         finally:
             try:
                 await self._redis.xack(self.config.inbound_stream, self.config.consumer_group, msg_id)

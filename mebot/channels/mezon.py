@@ -254,7 +254,7 @@ class MezonChannel:
                 self._client.get_zk_proof = _skip_zk_proof  # type: ignore[method-assign]
 
                 logger.info("Connecting to Mezon...")
-                await self._client.login(enable_auto_reconnect=True)
+                await self._client.login(enable_auto_reconnect=False)
                 logger.info(f"Mezon bot connected (client_id={self.config.client_id})")
                 if self._event_forwarder and hasattr(self._event_forwarder, "setup_event_forwarding"):
                     try:
@@ -309,9 +309,16 @@ class MezonChannel:
 
         try:
             from mezon import ChannelMessageContent
-            channel = await self._client.channels.fetch(int(msg.chat_id))
-            for chunk in _split_message(msg.content):
-                await channel.send(content=ChannelMessageContent(t=chunk))
+            target_type = (msg.metadata or {}).get("target_type", "channel")
+            if target_type == "dm":
+                user = await self._client.users.fetch(int(msg.chat_id))
+                for chunk in _split_message(msg.content):
+                    await user.send_dm_message(ChannelMessageContent(t=chunk))
+            else:
+                channel = await self._client.channels.fetch(int(msg.chat_id))
+                for chunk in _split_message(msg.content):
+                    logger.debug(f"Sending message to channel_id={msg.chat_id}: {chunk[:60]}...")
+                    await channel.send(content=ChannelMessageContent(t=chunk))
         except Exception as e:
             logger.error(f"Error sending Mezon message to {msg.chat_id}: {e}")
 
