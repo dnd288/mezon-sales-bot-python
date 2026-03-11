@@ -203,8 +203,8 @@ def onboard():
     console.print("\nNext steps:")
     console.print("  1. Add your API key to [cyan]~/.mebot/config.json[/cyan]")
     console.print("     Get one at: https://openrouter.ai/keys")
-    console.print("  2. Chat: [cyan]mebot agent -m \"Hello!\"[/cyan]")
-    console.print("\n[dim]Want Telegram/WhatsApp? See: https://github.com/HKUDS/mebot#-chat-apps[/dim]")
+    console.print("  2. Configure Mezon bot token in [cyan]channels.mezon[/cyan]")
+    console.print("  3. Start gateway: [cyan]mebot gateway[/cyan]")
 
 
 
@@ -369,7 +369,7 @@ def gateway(
     cron.on_job = on_cron_job
 
     # Create Mezon channel
-    mezon_ch = MezonChannel(config.channels.mezon, bus) if config.channels.mezon.enabled else None
+    mezon_ch = MezonChannel(config.channels.mezon, bus)
 
     def _pick_heartbeat_target() -> tuple[str, str]:
         """Pick the most recent mezon session, or fall back to cli."""
@@ -415,10 +415,7 @@ def gateway(
         enabled=hb_cfg.enabled,
     )
 
-    if mezon_ch:
-        console.print("[green]✓[/green] Mezon channel enabled")
-    else:
-        console.print("[yellow]Warning: Mezon channel disabled[/yellow]")
+    console.print("[green]✓[/green] Mezon channel ready")
 
     cron_status = cron.status()
     if cron_status["jobs"] > 0:
@@ -435,8 +432,7 @@ def gateway(
                         continue
                     if not msg.metadata.get("_tool_hint") and not config.channels.send_progress:
                         continue
-                if mezon_ch:
-                    await mezon_ch.send(msg)
+                await mezon_ch.send(msg)
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
@@ -447,11 +443,8 @@ def gateway(
         try:
             await cron.start()
             await heartbeat.start()
-            tasks = [agent.run()]
-            if mezon_ch:
-                dispatch_task = asyncio.create_task(_dispatch_outbound())
-                tasks.append(mezon_ch.start())
-            await asyncio.gather(*tasks)
+            dispatch_task = asyncio.create_task(_dispatch_outbound())
+            await asyncio.gather(agent.run(), mezon_ch.start(), dispatch_task)
         except KeyboardInterrupt:
             console.print("\nShutting down...")
         finally:
@@ -459,14 +452,12 @@ def gateway(
             heartbeat.stop()
             cron.stop()
             agent.stop()
-            if dispatch_task:
-                dispatch_task.cancel()
-                try:
-                    await dispatch_task
-                except asyncio.CancelledError:
-                    pass
-            if mezon_ch:
-                await mezon_ch.stop()
+            dispatch_task.cancel()
+            try:
+                await dispatch_task
+            except asyncio.CancelledError:
+                pass
+            await mezon_ch.stop()
 
     asyncio.run(run())
 
@@ -676,16 +667,11 @@ def channels_status():
 
     table = Table(title="Channel Status")
     table.add_column("Channel", style="cyan")
-    table.add_column("Enabled", style="green")
     table.add_column("Configuration", style="yellow")
 
     mz = config.channels.mezon
     mz_config = f"client_id: {mz.client_id[:10]}..." if mz.client_id else "[dim]not configured[/dim]"
-    table.add_row(
-        "Mezon",
-        "✓" if mz.enabled else "✗",
-        mz_config
-    )
+    table.add_row("Mezon", mz_config)
 
     console.print(table)
 

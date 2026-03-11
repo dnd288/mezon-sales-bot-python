@@ -14,13 +14,22 @@ class Base(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
+class AllowFromConfig(Base):
+    """Access control filter. Empty list or ['*'] means allow all."""
+
+    clan: list[str] = Field(default_factory=list)     # Allowed clan IDs; empty = allow all
+    channel: list[str] = Field(default_factory=list)  # Allowed channel IDs; empty = allow all
+    user: list[str] = Field(default_factory=list)     # Allowed user IDs; empty = allow all
+
+
 class MezonConfig(Base):
     """Mezon channel configuration using mezon-sdk."""
 
-    enabled: bool = False
     client_id: str = ""  # Bot/app ID from Mezon developer portal
     token: str = ""  # API key from Mezon developer portal
-    allow_from: list[str] = Field(default_factory=list)  # Allowed user IDs (empty = allow all)
+    bot_username: str = ""  # Bot's @username on Mezon (used for mention_only detection)
+    allow_from: AllowFromConfig = Field(default_factory=AllowFromConfig)  # Access control (empty = allow all)
+    mention_only: bool = False  # If true, bot only responds when directly mentioned
 
 
 class ChannelsConfig(Base):
