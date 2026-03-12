@@ -1,39 +1,53 @@
-# mezon-sales-bot-python
+# 🤖 Mezon Sales Bot (Python)
 
-AI sales bot for the [Mezon](https://mezon.ai) platform, built on the `mebot` agent framework. Connects to Mezon via WebSocket (no public IP required) and handles customer inquiries using an LLM backend.
+[![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/release/python-3130/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## Features
+A powerful, extensible AI sales bot and agent framework designed specifically for the [Mezon](https://mezon.ai) platform. Built on the custom `mebot` framework, it connects securely via WebSocket (no public IP required) and handles customer inquiries autonomously using state-of-the-art LLMs.
 
-- Mezon channel integration via `mezon-sdk` with auto-reconnect
-- Lean message pipeline with mention-only filtering and typing indicators
-- LLM support via LiteLLM (OpenRouter, Anthropic, OpenAI, DeepSeek, etc.)
-- Cron scheduling and heartbeat service
-- MCP (Model Context Protocol) tool support
-- Split CLI surface for direct agent interaction, gateway server mode, provider login, and session tools
-- Optional Redis integration: Streams bridge for external triggers (n8n, webhooks) and Redis-backed session storage with TTL
+---
 
-## Requirements
+## ✨ Key Features
 
-- Python 3.13+
-- A Mezon bot account (`client_id` + `token`)
-- An LLM API key (e.g. OpenRouter, Anthropic)
-- Redis 7+ (optional — for Streams bridge and/or session storage)
+- **Seamless Mezon Integration**: Uses `mezon-sdk` for reliable WebSocket connections, auto-reconnects, typing indicators, and mention-only filtering.
+- **Multi-LLM Support**: Powered by LiteLLM. Easily switch between OpenAI, Anthropic (Claude), DeepSeek, and OpenRouter with simple configuration.
+- **Agentic Capabilities**: Supports MCP (Model Context Protocol) tools, long-term memory consolidation, and autonomous subagent background tasks.
+- **Redis Streams Bridge (Optional)**: Connect your bot to external no-code platforms (like n8n) or webhooks using Redis Streams.
+- **Robust Session Management**: TTL-aware session storage backed by Redis, with seamless fallback to local disk (JSONL) if Redis is unavailable.
+- **Cron & Heartbeat**: Built-in task runner and cron scheduler for proactive engagement.
+- **Versatile CLI**: A developer-friendly command-line interface for direct agent testing, gateway execution, and status monitoring.
 
-## Installation
+## 📋 Prerequisites
+
+To run this project, you will need:
+- **Python 3.13** or higher
+- A **Mezon Bot Account** (`client_id` and `token`)
+- An **LLM API Key** (e.g., from OpenRouter, OpenAI, or Anthropic)
+- *(Optional)* **Redis 7+** (for advanced session storage and the Streams bridge)
+
+## 🚀 Quick Start
+
+### 1. Installation
+
+Clone the repository and install the package in editable mode:
 
 ```bash
+git clone https://github.com/your-org/mezon-sales-bot-python.git
+cd mezon-sales-bot-python
 pip install -e .
 ```
 
-## Configuration
+### 2. Configuration Initialization
 
-Initialize config:
+Run the onboarding command to generate the default configuration structure into `~/.mebot/config.json`:
 
 ```bash
 mebot onboard
 ```
 
-Edit `~/.mebot/config.json`:
+### 3. Setup Credentials
+
+Edit `~/.mebot/config.json` to include your Mezon and LLM credentials:
 
 ```json
 {
@@ -51,38 +65,38 @@ Edit `~/.mebot/config.json`:
   },
   "agents": {
     "defaults": {
-      "model": "anthropic/claude-opus-4-5"
+      "model": "anthropic/claude-3-5-sonnet",
+      "tool_result_max_chars": 500
     }
   }
 }
 ```
 
-## Usage
+### 4. Running the Bot
 
-**Start the gateway (Mezon channel + cron + heartbeat):**
-
+**Start the Gateway Server:**
+Runs the Mezon channel integration, cron jobs, and heartbeat service.
 ```bash
 mebot gateway
 ```
 
-**Chat directly via CLI:**
-
+**Test the Agent locally (CLI Chat):**
+Chat directly with your configured agent without connecting to Mezon.
 ```bash
 mebot agent -m "Hello!"
-# or interactive mode
+# Or launch interactive mode:
 mebot agent
 ```
 
-**Check status:**
-
+**Check System Status:**
 ```bash
 mebot status
 mebot channels status
 ```
 
-## Redis Integration (optional)
+## 📦 Advanced: Redis Integration
 
-Enable Redis in `~/.mebot/config.json`:
+Redis unlocks advanced features for scaling and external integrations. Enable it in your `~/.mebot/config.json`:
 
 ```json
 {
@@ -94,37 +108,22 @@ Enable Redis in `~/.mebot/config.json`:
   }
 }
 ```
+- **Session Storage**: Automatically migrates chats to Redis hashes/lists. Expired sessions are cleaned up based on TTL. 
+- **Migration**: Run `mebot session migrate` to move disk sessions to Redis.
+- **Streams Bridge**: Consume external events by pushing to the `mebot:inbound` stream, and forward Mezon events outward to the `mezon:events` stream.
 
-- **Streams bridge:** External services push to `mebot:inbound` stream; Mezon events forwarded to `mezon:events` stream
-- **Session storage:** Sessions stored in Redis hashes+lists with configurable TTL (fallback: disk JSONL)
-- **Migration:** `mebot session migrate` converts disk sessions to Redis
+## 🐳 Docker Deployment
 
-If `redis.enabled` is `false` or Redis is unreachable, the bot falls back to disk sessions automatically.
-
-## Docker
+A production-ready `docker-compose.yml` is included. It mounts your `~/.mebot` configuration directory and spins up Redis alongside the gateway.
 
 ```bash
 docker compose up -d mebot-gateway
 ```
 
-Config is mounted from `~/.mebot` on the host. Docker Compose includes a Redis service by default.
+## 🏗️ Architecture & Contributing
 
-## Project Structure
+For a detailed breakdown of the internal architecture, module layout, and request lifecycle, please read the [Codebase Summary & Architecture Guide](docs/codebase-summary.md).
 
-```
-mebot/
-├── agent/          # Agent loop, runtime config, tools, memory
-├── bridge/         # External transport adapters (Redis Streams)
-├── channels/       # Chat channel integrations + compatibility exports
-├── cli/            # Split CLI command modules and entrypoint
-├── config/         # Config schema and loader
-├── cron/           # Cron job scheduler
-├── heartbeat/      # Periodic task runner
-├── providers/      # LLM provider adapters
-├── session/        # Disk/Redis session management
-└── utils/          # Shared helpers and Redis client bootstrap
-```
+## 📄 License
 
-## License
-
-MIT
+This project is licensed under the [MIT License](LICENSE).
