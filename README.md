@@ -5,16 +5,16 @@ AI sales bot for the [Mezon](https://mezon.ai) platform, built on the `mebot` ag
 ## Features
 
 - Mezon channel integration via `mezon-sdk` with auto-reconnect
-- Extensible handler-based architecture for routing commands
+- Lean message pipeline with mention-only filtering and typing indicators
 - LLM support via LiteLLM (OpenRouter, Anthropic, OpenAI, DeepSeek, etc.)
 - Cron scheduling and heartbeat service
 - MCP (Model Context Protocol) tool support
-- CLI for direct agent interaction and gateway server mode
+- Split CLI surface for direct agent interaction, gateway server mode, provider login, and session tools
 - Optional Redis integration: Streams bridge for external triggers (n8n, webhooks) and Redis-backed session storage with TTL
 
 ## Requirements
 
-- Python 3.11+
+- Python 3.13+
 - A Mezon bot account (`client_id` + `token`)
 - An LLM API key (e.g. OpenRouter, Anthropic)
 - Redis 7+ (optional — for Streams bridge and/or session storage)
@@ -113,14 +113,16 @@ Config is mounted from `~/.mebot` on the host. Docker Compose includes a Redis s
 
 ```
 mebot/
-├── agent/          # Agent loop, tools, memory
-├── channels/       # Mezon channel integration
-├── cli/            # CLI commands
+├── agent/          # Agent loop, runtime config, tools, memory
+├── bridge/         # External transport adapters (Redis Streams)
+├── channels/       # Chat channel integrations + compatibility exports
+├── cli/            # Split CLI command modules and entrypoint
 ├── config/         # Config schema and loader
 ├── cron/           # Cron job scheduler
 ├── heartbeat/      # Periodic task runner
 ├── providers/      # LLM provider adapters
-└── session/        # Session management
+├── session/        # Disk/Redis session management
+└── utils/          # Shared helpers and Redis client bootstrap
 ```
 
 ## License

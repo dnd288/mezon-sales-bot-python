@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +15,7 @@ from mebot.bus.events import InboundMessage
 from mebot.bus.queue import MessageBus
 from mebot.config.schema import ExecToolConfig
 from mebot.providers.base import LLMProvider
+from mebot.utils.helpers import generate_short_id
 
 
 class SubagentManager:
@@ -59,7 +59,7 @@ class SubagentManager:
         session_key: str | None = None,
     ) -> str:
         """Spawn a subagent to execute a task in the background."""
-        task_id = str(uuid.uuid4())[:8]
+        task_id = generate_short_id()
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         origin = {"channel": origin_channel, "chat_id": origin_chat_id}
 

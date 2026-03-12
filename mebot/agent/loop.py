@@ -5,13 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import weakref
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
 
+from mebot.agent.config import AgentConfig
 from mebot.agent.context import ContextBuilder
 from mebot.agent.memory import MemoryStore
 from mebot.agent.subagent import SubagentManager
@@ -28,7 +28,7 @@ from mebot.providers.base import LLMProvider
 from mebot.session.manager import Session, SessionManager, SessionStore
 
 if TYPE_CHECKING:
-    from mebot.config.schema import ChannelsConfig, ExecToolConfig
+    from mebot.config.schema import ChannelsConfig
     from mebot.cron.service import CronService
 
 
@@ -44,14 +44,15 @@ class AgentLoop:
     5. Sends responses back
     """
 
-    _TOOL_RESULT_MAX_CHARS = 500
-    _GENERIC_LLM_PROVIDER_ERROR = "Có lỗi xảy ra với LLM Provider. Vui lòng thử lại sau."
+    _GENERIC_LLM_PROVIDER_ERROR = "An error occurred with the LLM provider. Please try again later."
 
     def __init__(
         self,
         bus: MessageBus,
         provider: LLMProvider,
-        workspace: Path,
+        workspace: Path | None = None,
+        *,
+        config: AgentConfig | None = None,
         model: str | None = None,
         max_iterations: int = 40,
         temperature: float = 0.1,
@@ -60,58 +61,98 @@ class AgentLoop:
         reasoning_effort: str | None = None,
         brave_api_key: str | None = None,
         web_proxy: str | None = None,
-        exec_config: ExecToolConfig | None = None,
-        cron_service: CronService | None = None,
+        exec_config=None,
         restrict_to_workspace: bool = False,
         session_manager: SessionStore | None = None,
+        cron_service: CronService | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
     ):
-        from mebot.config.schema import ExecToolConfig
+        if config is None:
+            from mebot.config.schema import ExecToolConfig
+
+            if workspace is None:
+                raise ValueError("workspace is required when config is not provided")
+            config = AgentConfig(
+                workspace=workspace,
+                model=model,
+                max_iterations=max_iterations,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                memory_window=memory_window,
+                reasoning_effort=reasoning_effort,
+                brave_api_key=brave_api_key,
+                web_proxy=web_proxy,
+                exec_config=exec_config or ExecToolConfig(),
+                restrict_to_workspace=restrict_to_workspace,
+                mcp_servers=mcp_servers or {},
+            )
+
         self.bus = bus
+        self.config = config
         self.channels_config = channels_config
         self.provider = provider
-        self.workspace = workspace
-        self.model = model or provider.get_default_model()
-        self.max_iterations = max_iterations
-        self.temperature = temperature
-        self.max_tokens = max_tokens
-        self.memory_window = memory_window
-        self.reasoning_effort = reasoning_effort
-        self.brave_api_key = brave_api_key
-        self.web_proxy = web_proxy
-        self.exec_config = exec_config or ExecToolConfig()
+        self.workspace = config.workspace
+        self.model = config.model or provider.get_default_model()
+        self.max_iterations = config.max_iterations
+        self.temperature = config.temperature
+        self.max_tokens = config.max_tokens
+        self.memory_window = config.memory_window
+        self.reasoning_effort = config.reasoning_effort
+        self.brave_api_key = config.brave_api_key
+        self.web_proxy = config.web_proxy
+        self.exec_config = config.exec_config
         self.cron_service = cron_service
-        self.restrict_to_workspace = restrict_to_workspace
+        self.restrict_to_workspace = config.restrict_to_workspace
+        self.tool_result_max_chars = config.tool_result_max_chars
 
-        self.context = ContextBuilder(workspace)
-        self.sessions = session_manager or SessionManager(workspace)
+        self.context = ContextBuilder(self.workspace)
+        self.sessions = session_manager or SessionManager(self.workspace)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
             provider=provider,
-            workspace=workspace,
+            workspace=self.workspace,
             bus=bus,
             model=self.model,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
-            reasoning_effort=reasoning_effort,
-            brave_api_key=brave_api_key,
-            web_proxy=web_proxy,
+            reasoning_effort=self.reasoning_effort,
+            brave_api_key=self.brave_api_key,
+            web_proxy=self.web_proxy,
             exec_config=self.exec_config,
-            restrict_to_workspace=restrict_to_workspace,
+            restrict_to_workspace=self.restrict_to_workspace,
         )
 
         self._running = False
-        self._mcp_servers = mcp_servers or {}
+        self._mcp_servers = dict(config.mcp_servers)
         self._mcp_stack: AsyncExitStack | None = None
         self._mcp_connected = False
         self._mcp_connecting = False
         self._consolidating: set[str] = set()  # Session keys with consolidation in progress
         self._consolidation_tasks: set[asyncio.Task] = set()  # Strong refs to in-flight tasks
-        self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+        self._consolidation_locks: dict[str, asyncio.Lock] = {}
+        self._lock_refs: dict[str, int] = {}
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._processing_lock = asyncio.Lock()
         self._register_default_tools()
+
+    def _acquire_consolidation_lock(self, session_key: str) -> asyncio.Lock:
+        """Return a per-session consolidation lock and keep a strong reference while in use."""
+        lock = self._consolidation_locks.get(session_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._consolidation_locks[session_key] = lock
+        self._lock_refs[session_key] = self._lock_refs.get(session_key, 0) + 1
+        return lock
+
+    def _release_consolidation_lock(self, session_key: str) -> None:
+        """Release one strong-reference slot for a per-session consolidation lock."""
+        refs = self._lock_refs.get(session_key, 0) - 1
+        if refs > 0:
+            self._lock_refs[session_key] = refs
+            return
+        self._lock_refs.pop(session_key, None)
+        self._consolidation_locks.pop(session_key, None)
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
@@ -363,7 +404,7 @@ class AgentLoop:
         # Slash commands
         cmd = msg.content.strip().lower()
         if cmd == "/new":
-            lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
+            lock = self._acquire_consolidation_lock(session.key)
             self._consolidating.add(session.key)
             try:
                 async with lock:
@@ -384,6 +425,7 @@ class AgentLoop:
                 )
             finally:
                 self._consolidating.discard(session.key)
+                self._release_consolidation_lock(session.key)
 
             session.clear()
             self.sessions.save(session)
@@ -397,7 +439,7 @@ class AgentLoop:
         unconsolidated = len(session.messages) - session.last_consolidated
         if (unconsolidated >= self.memory_window and session.key not in self._consolidating):
             self._consolidating.add(session.key)
-            lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
+            lock = self._acquire_consolidation_lock(session.key)
 
             async def _consolidate_and_unlock():
                 try:
@@ -405,6 +447,7 @@ class AgentLoop:
                         await self._consolidate_memory(session)
                 finally:
                     self._consolidating.discard(session.key)
+                    self._release_consolidation_lock(session.key)
                     _task = asyncio.current_task()
                     if _task is not None:
                         self._consolidation_tasks.discard(_task)
@@ -461,8 +504,8 @@ class AgentLoop:
             role, content = entry.get("role"), entry.get("content")
             if role == "assistant" and not content and not entry.get("tool_calls"):
                 continue  # skip empty assistant messages — they poison session context
-            if role == "tool" and isinstance(content, str) and len(content) > self._TOOL_RESULT_MAX_CHARS:
-                entry["content"] = content[:self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
+            if role == "tool" and isinstance(content, str) and len(content) > self.tool_result_max_chars:
+                entry["content"] = content[:self.tool_result_max_chars] + "\n... (truncated)"
             elif role == "user":
                 if isinstance(content, str) and content.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
                     # Strip the runtime-context prefix, keep only the user text.

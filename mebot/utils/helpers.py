@@ -1,6 +1,7 @@
 """Utility functions for mebot."""
 
 import re
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -66,6 +67,15 @@ def split_message(content: str, max_len: int = 2000) -> list[str]:
         chunks.append(content[:pos])
         content = content[pos:].lstrip()
     return chunks
+
+
+def generate_short_id(length: int = 12) -> str:
+    """Generate a short random identifier from a UUID4 hex string."""
+    if length <= 0:
+        raise ValueError("length must be greater than 0")
+    if length > 32:
+        raise ValueError("length must be 32 or less")
+    return uuid.uuid4().hex[:length]
 
 
 def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]:
