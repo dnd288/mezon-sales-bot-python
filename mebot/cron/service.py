@@ -3,7 +3,6 @@
 import asyncio
 import json
 import time
-import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Coroutine
@@ -11,6 +10,7 @@ from typing import Any, Callable, Coroutine
 from loguru import logger
 
 from mebot.cron.types import CronJob, CronJobState, CronPayload, CronSchedule, CronStore
+from mebot.utils.helpers import generate_short_id
 
 
 def _now_ms() -> int:
@@ -299,7 +299,7 @@ class CronService:
         now = _now_ms()
 
         job = CronJob(
-            id=str(uuid.uuid4())[:8],
+            id=generate_short_id(),
             name=name,
             enabled=True,
             schedule=schedule,

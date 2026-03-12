@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote
@@ -14,12 +15,15 @@ from mebot.session.manager import Session
 class RedisSessionManager:
     """Session storage in Redis (meta hash + messages list)."""
 
+    _CACHE_MAX_AGE_S = 5 * 60
+
     def __init__(self, redis_client: Any, config: RedisSessionConfig):
         self.redis = redis_client
         self.config = config
         self.key_prefix = config.key_prefix
         self.ttl_seconds = max(0, int(config.ttl_days * 24 * 60 * 60))
         self._cache: dict[str, Session] = {}
+        self._cache_ts: dict[str, float] = {}
         self._saved_counts: dict[str, int] = {}
 
     def _safe_key(self, key: str) -> str:
@@ -41,7 +45,8 @@ class RedisSessionManager:
         pipe.execute()
 
     def get_or_create(self, key: str) -> Session:
-        if key in self._cache:
+        cache_ts = self._cache_ts.get(key)
+        if key in self._cache and cache_ts is not None and (time.monotonic() - cache_ts) <= self._CACHE_MAX_AGE_S:
             return self._cache[key]
 
         meta = self.redis.hgetall(self._meta_key(key)) or {}
@@ -72,6 +77,7 @@ class RedisSessionManager:
         else:
             session = Session(key=key)
         self._cache[key] = session
+        self._cache_ts[key] = time.monotonic()
         self._saved_counts[key] = len(session.messages)
         return session
 
@@ -99,11 +105,13 @@ class RedisSessionManager:
         )
 
         self._cache[session.key] = session
+        self._cache_ts[session.key] = time.monotonic()
         self._saved_counts[session.key] = len(session.messages)
         self._touch_ttl(session.key)
 
     def invalidate(self, key: str) -> None:
         self._cache.pop(key, None)
+        self._cache_ts.pop(key, None)
         self._saved_counts.pop(key, None)
 
     def list_sessions(self) -> list[dict[str, Any]]:

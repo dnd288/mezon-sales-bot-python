@@ -1,38 +1,36 @@
-"""Mezon channel implementation using mezon-sdk with handler-based architecture."""
+"""Mezon chat channel implementation."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import re
-from abc import ABC, abstractmethod
-from typing import Any, List
+from typing import Any
 
 from loguru import logger
 
 from mebot.bus.events import InboundMessage, OutboundMessage
 from mebot.bus.queue import MessageBus
 from mebot.config.schema import AllowFromConfig, MezonConfig
+from mebot.utils.helpers import split_message
 
 
-def _split_message(content: str, max_len: int = 2000) -> list[str]:
-    """Split content into chunks within max_len, preferring line breaks."""
-    if len(content) <= max_len:
-        return [content]
-    chunks: list[str] = []
-    while content:
-        if len(content) <= max_len:
-            chunks.append(content)
-            break
-        cut = content[:max_len]
-        pos = cut.rfind("\n")
-        if pos == -1:
-            pos = cut.rfind(" ")
-        if pos == -1:
-            pos = max_len
-        chunks.append(content[:pos])
-        content = content[pos:].lstrip()
-    return chunks
+def is_allowed(
+    allow_from: AllowFromConfig,
+    sender_id: str,
+    clan_id: str = "",
+    channel_id: str = "",
+) -> bool:
+    """Check whether a sender is permitted by allow_from filters."""
+
+    def _match(ids: list[str], value: str) -> bool:
+        return not ids or "*" in ids or value in ids
+
+    return (
+        _match(allow_from.clan, clan_id)
+        and _match(allow_from.channel, channel_id)
+        and _match(allow_from.user, sender_id)
+    )
 
 
 def _extract_message_text(raw_content: Any) -> str:
@@ -66,108 +64,11 @@ def _extract_message_text(raw_content: Any) -> str:
     return str(raw_content)
 
 
-class BaseMessageHandler(ABC):
-    """Base class for message handlers following the template pattern."""
-
-    def __init__(self, client_id: str):
-        self.client_id = client_id
-
-    @abstractmethod
-    def get_command(self) -> str:
-        """Return the command this handler responds to."""
-
-    @abstractmethod
-    async def handle(self, message: Any, content: str) -> None:
-        """Handle the incoming message."""
-
-    def should_handle(self, content: str) -> bool:
-        """Determine if this handler should process the message."""
-        command = self.get_command()
-        return content.strip().lower().startswith(command.lower())
-
-    async def send_message(self, channel: Any, content: str, **kwargs) -> None:
-        """Send a message to the channel."""
-        try:
-            from mezon import ChannelMessageContent
-            await channel.send(content=ChannelMessageContent(t=content), **kwargs)
-        except Exception as e:
-            logger.error(f"Error sending message: {e}")
-
-    async def reply_message(self, channel: Any, content: str, **kwargs) -> None:
-        """Reply to a message."""
-        await self.send_message(channel, content, **kwargs)
-
-
-class HandlerManager:
-    """Manages and routes messages to appropriate handlers."""
-
-    def __init__(self, client_id: str, allow_from: AllowFromConfig | None = None):
-        self.client_id = client_id
-        self.allow_from = allow_from or AllowFromConfig()
-        self.handlers: List[BaseMessageHandler] = []
-
-    def register_handler(self, handler: BaseMessageHandler) -> None:
-        """Register a new message handler."""
-        self.handlers.append(handler)
-        logger.info(f"Registered handler: {handler.__class__.__name__} for command: {handler.get_command()}")
-
-    def _is_allowed(self, message: Any) -> bool:
-        """Check if message is allowed based on clan/channel/user filters."""
-        def _match(ids: list[str], value: str) -> bool:
-            return not ids or "*" in ids or value in ids
-
-        af = self.allow_from
-        return (
-            _match(af.clan, str(getattr(message, "clan_id", "") or ""))
-            and _match(af.channel, str(getattr(message, "channel_id", "") or ""))
-            and _match(af.user, str(getattr(message, "sender_id", "") or ""))
-        )
-
-    async def handle_message(self, message: Any) -> None:
-        """Route an incoming message to the appropriate handler."""
-        try:
-            if getattr(message, "sender_id", "") == self.client_id:
-                return
-
-            if not self._is_allowed(message):
-                logger.debug(f"Message from sender={getattr(message, 'sender_id', '')} clan={getattr(message, 'clan_id', '')} channel={getattr(message, 'channel_id', '')} blocked by allow_from filter")
-                return
-
-            content = _extract_message_text(getattr(message, "content", None))
-
-            if not content.strip():
-                return
-
-            for handler in self.handlers:
-                if handler.should_handle(content):
-                    logger.info(f"Routing to {handler.__class__.__name__} for command: {handler.get_command()}")
-                    await handler.handle(message, content)
-                    break
-
-        except Exception as e:
-            logger.error(f"Error in HandlerManager.handle_message: {e}")
-
-
-class DefaultHandler(BaseMessageHandler):
-    """Default handler that processes all messages when no specific handler matches."""
-
-    def get_command(self) -> str:
-        return "*"
-
-    def should_handle(self, content: str) -> bool:
-        return True
-
-    async def handle(self, message: Any, content: str) -> None:
-        sender_id = getattr(message, "sender_id", "")
-        channel_id = getattr(message, "channel_id", "")
-        logger.debug(f"Default handler processing message from {sender_id} in {channel_id}: {content[:60]}...")
-
-
 class MezonChannel:
     """
-    Mezon channel using mezon-sdk WebSocket connection with handler-based architecture.
+    Mezon channel using mezon-sdk WebSocket connection.
 
-    No public IP required — uses persistent WebSocket with auto-reconnect.
+    No public IP required; uses a persistent WebSocket with reconnect.
     """
 
     name = "mezon"
@@ -179,21 +80,10 @@ class MezonChannel:
         self._running = False
         self._client = None
         self._typing_tasks: dict[str, asyncio.Task] = {}
-        self.handler_manager = HandlerManager(str(config.client_id), config.allow_from)
-
-        self.handler_manager.register_handler(DefaultHandler(str(config.client_id)))
 
     def is_allowed(self, sender_id: str, clan_id: str = "", channel_id: str = "") -> bool:
-        """Check if message is permitted based on clan/channel/user filters. Empty = allow all."""
-        def _match(ids: list[str], value: str) -> bool:
-            return not ids or "*" in ids or value in ids
-
-        af = self.config.allow_from
-        return (
-            _match(af.clan, clan_id)
-            and _match(af.channel, channel_id)
-            and _match(af.user, sender_id)
-        )
+        """Check if message is permitted based on clan/channel/user filters."""
+        return is_allowed(self.config.allow_from, sender_id, clan_id=clan_id, channel_id=channel_id)
 
     async def _handle_message(
         self,
@@ -206,23 +96,17 @@ class MezonChannel:
         session_key: str | None = None,
     ) -> None:
         """Publish an inbound message to the bus."""
-        if not self.is_allowed(sender_id, clan_id=clan_id, channel_id=chat_id):
-            logger.warning(
-                "Access denied: sender={} clan={} channel={}. "
-                "Update allow_from config to grant access.",
-                sender_id, clan_id, chat_id,
+        await self.bus.publish_inbound(
+            InboundMessage(
+                channel=self.name,
+                sender_id=str(sender_id),
+                chat_id=str(chat_id),
+                content=content,
+                media=media or [],
+                metadata=metadata or {},
+                session_key_override=session_key,
             )
-            return
-
-        await self.bus.publish_inbound(InboundMessage(
-            channel=self.name,
-            sender_id=str(sender_id),
-            chat_id=str(chat_id),
-            content=content,
-            media=media or [],
-            metadata=metadata or {},
-            session_key_override=session_key,
-        ))
+        )
 
     @property
     def is_running(self) -> bool:
@@ -245,7 +129,6 @@ class MezonChannel:
                     client_id=self.config.client_id,
                     api_key=self.config.token,
                 )
-
                 self._client.on_channel_message(self._on_message)
 
                 async def _skip_zk_proof() -> None:
@@ -255,21 +138,22 @@ class MezonChannel:
 
                 logger.info("Connecting to Mezon...")
                 await self._client.login(enable_auto_reconnect=False)
-                logger.info(f"Mezon bot connected (client_id={self.config.client_id})")
+                logger.info("Mezon bot connected (client_id={})", self.config.client_id)
+
                 if self._event_forwarder and hasattr(self._event_forwarder, "setup_event_forwarding"):
                     try:
                         await self._event_forwarder.setup_event_forwarding(self._client)
-                    except Exception as e:
-                        logger.warning(f"Failed to setup Redis event forwarding: {e}")
+                    except Exception as exc:
+                        logger.warning("Failed to setup Redis event forwarding: {}", exc)
 
-                logger.info(f"Registered {len(self.handler_manager.handlers)} message handlers")
-
-                af = self.handler_manager.allow_from
-                active = [k for k in ("clan", "channel", "user") if getattr(af, k)]
+                active = [k for k in ("clan", "channel", "user") if getattr(self.config.allow_from, k)]
                 if active:
-                    logger.info(f"Allow_from filter active on: {', '.join(active)}")
+                    logger.info("Allow_from filter active on: {}", ", ".join(active))
                 else:
-                    logger.info("Allow_from filter disabled (accepting messages from all clans/channels/users)")
+                    logger.info(
+                        "Allow_from filter disabled (accepting messages from all clans/channels/users)"
+                    )
+
                 while self._running:
                     await asyncio.sleep(5)
                     if self._client and not await self._client.socket_manager.is_connected():
@@ -278,21 +162,23 @@ class MezonChannel:
 
             except asyncio.CancelledError:
                 break
-            except Exception as e:
+            except Exception as exc:
                 if not self._running:
                     break
-                logger.warning(f"Mezon connection error: {e}. Reconnecting in {reconnect_delay}s...")
+                logger.warning("Mezon connection error: {}. Reconnecting in {}s...", exc, reconnect_delay)
                 await asyncio.sleep(reconnect_delay)
                 reconnect_delay = min(reconnect_delay * 2, 60)
 
     async def stop(self) -> None:
         """Stop the Mezon bot connection."""
         self._running = False
+        for channel_id in list(self._typing_tasks):
+            self._stop_typing(channel_id)
         if self._client:
             try:
                 await self._client.disconnect()
-            except Exception as e:
-                logger.debug(f"Mezon disconnect: {e}")
+            except Exception as exc:
+                logger.debug("Mezon disconnect: {}", exc)
             self._client = None
 
     async def send(self, msg: OutboundMessage) -> None:
@@ -309,40 +195,49 @@ class MezonChannel:
 
         try:
             from mezon import ChannelMessageContent
+
             target_type = (msg.metadata or {}).get("target_type", "channel")
             if target_type == "dm":
                 user = await self._client.users.fetch(int(msg.chat_id))
-                for chunk in _split_message(msg.content):
+                for chunk in split_message(msg.content):
                     await user.send_dm_message(ChannelMessageContent(t=chunk))
             else:
                 channel = await self._client.channels.fetch(int(msg.chat_id))
-                for chunk in _split_message(msg.content):
-                    logger.debug(f"Sending message to channel_id={msg.chat_id}: {chunk[:60]}...")
+                for chunk in split_message(msg.content):
+                    logger.debug("Sending message to channel_id={}: {}...", msg.chat_id, chunk[:60])
                     await channel.send(content=ChannelMessageContent(t=chunk))
-        except Exception as e:
-            logger.error(f"Error sending Mezon message to {msg.chat_id}: {e}")
+        except Exception as exc:
+            logger.error("Error sending Mezon message to {}: {}", msg.chat_id, exc)
 
     @staticmethod
     def _should_stop_typing(msg: OutboundMessage) -> bool:
         """Keep typing active for progress updates while agent is still processing."""
         return not bool((msg.metadata or {}).get("_progress"))
 
-    async def _on_message(self, message) -> None:
+    async def _on_message(self, message: Any) -> None:
         """Handle an incoming Mezon channel message."""
         try:
-            await self.handler_manager.handle_message(message)
-
             sender_id = str(getattr(message, "sender_id", "") or "")
             channel_id = str(getattr(message, "channel_id", "") or "")
-
             if not sender_id or not channel_id:
                 return
-
             if sender_id == str(self.config.client_id):
                 return
 
             clan_id = str(getattr(message, "clan_id", "") or "")
             if not self.is_allowed(sender_id, clan_id=clan_id, channel_id=channel_id):
+                logger.debug(
+                    "Message from sender={} clan={} channel={} blocked by allow_from filter",
+                    sender_id,
+                    clan_id,
+                    channel_id,
+                )
+                return
+
+            content = _extract_message_text(getattr(message, "content", None))
+            if not content.strip():
+                return
+            if not self._should_respond_to_message(message, content):
                 return
 
             channel_type = getattr(message, "channel_type", None)
@@ -351,15 +246,6 @@ class MezonChannel:
                 message_mode=getattr(message, "mode", None),
             )
             is_public = getattr(message, "is_public", True)
-
-            content = _extract_message_text(getattr(message, "content", None))
-
-            if not content.strip():
-                return
-
-            if not self._should_respond_to_message(message, content):
-                return
-
             self._start_typing(channel_id, int(clan_id) if clan_id else 0, mode, is_public)
 
             await self._handle_message(
@@ -374,18 +260,18 @@ class MezonChannel:
                     "username": str(getattr(message, "username", "") or ""),
                 },
             )
-        except Exception as e:
-            logger.error(f"Error handling Mezon message: {e}")
+        except Exception:
+            logger.exception("Error handling Mezon message")
 
     async def _typing_loop(self, clan_id: int, channel_id: int, mode: int, is_public: bool) -> None:
         """Send typing indicator every 4s until cancelled."""
+        logged_error = False
         try:
             while True:
                 if not self._client or not getattr(self._client, "socket_manager", None):
                     await asyncio.sleep(1)
                     continue
                 try:
-                    logger.debug(f"Sending typing indicator for clan_id={clan_id} channel_id={channel_id}")
                     socket_manager = self._client.socket_manager
                     writer = getattr(socket_manager, "write_message_typing", None)
                     if callable(writer):
@@ -396,23 +282,24 @@ class MezonChannel:
                             is_public=is_public,
                         )
                     else:
-                        # mezon-sdk 1.6.x exposes typing on Socket, not SocketManager.
                         await socket_manager.get_socket().write_message_typing(
                             clan_id=clan_id,
                             channel_id=channel_id,
                             mode=mode,
                             is_public=is_public,
                         )
+                    logged_error = False
                 except asyncio.CancelledError:
                     raise
-                except Exception as e:
-                    # Keep retrying if typing ACK is flaky instead of terminating the loop.
-                    logger.debug(f"Typing send failed for channel_id={channel_id}: {e}")
+                except Exception as exc:
+                    if not logged_error:
+                        logger.debug("Typing send failed for channel_id={}: {}", channel_id, exc)
+                        logged_error = True
                     await asyncio.sleep(2)
                     continue
                 await asyncio.sleep(4)
         except asyncio.CancelledError:
-            pass
+            logger.debug("Stopped typing indicator for channel_id={}", channel_id)
 
     @staticmethod
     def _resolve_typing_mode(channel_type: Any, message_mode: Any) -> int:
@@ -420,6 +307,7 @@ class MezonChannel:
         try:
             if channel_type is not None:
                 from mezon.utils.helper import convert_channeltype_to_channel_mode
+
                 return int(convert_channeltype_to_channel_mode(int(channel_type)))
         except Exception:
             pass
@@ -445,7 +333,6 @@ class MezonChannel:
             if bot_username and isinstance(username, str) and username.strip().lstrip("@").lower() == bot_username:
                 return True
 
-        # Fallback for plain-text mentions when mentions array is missing/incomplete.
         if bot_id and re.search(rf"<@!?{re.escape(bot_id)}>", content):
             return True
         if bot_username and re.search(rf"(?<!\w)@?{re.escape(bot_username)}(?!\w)", content, re.IGNORECASE):
@@ -489,6 +376,7 @@ class MezonChannel:
         existing = self._typing_tasks.get(channel_id)
         if existing and not existing.done():
             return
+        logger.debug("Starting typing indicator for channel_id={}", channel_id)
         self._typing_tasks[channel_id] = asyncio.create_task(
             self._typing_loop(int(clan_id), int(channel_id), mode, is_public)
         )
@@ -497,8 +385,5 @@ class MezonChannel:
         """Cancel typing indicator for a channel."""
         task = self._typing_tasks.pop(channel_id, None)
         if task:
+            logger.debug("Stopping typing indicator for channel_id={}", channel_id)
             task.cancel()
-
-    def register_handler(self, handler: BaseMessageHandler) -> None:
-        """Register a custom message handler."""
-        self.handler_manager.register_handler(handler)
