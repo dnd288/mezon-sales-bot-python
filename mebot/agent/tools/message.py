@@ -1,9 +1,15 @@
 """Message tool for sending messages to users."""
 
+import re
 from typing import Any, Awaitable, Callable
 
 from mebot.agent.tools.base import Tool
 from mebot.bus.events import OutboundMessage
+
+
+def strip_think(text: str) -> str:
+    """Strip <think>...</think> blocks from content before sending."""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
 class MessageTool(Tool):
@@ -79,6 +85,7 @@ class MessageTool(Tool):
         media: list[str] | None = None,
         **kwargs: Any
     ) -> str:
+        content = strip_think(content)
         channel = channel or self._default_channel
         chat_id = chat_id or self._default_chat_id
         message_id = message_id or self._default_message_id

@@ -12,6 +12,10 @@ from mebot.agent.tools.base import Tool
 class ExecTool(Tool):
     """Tool to execute shell commands."""
 
+    _MAX_TIMEOUT = 600
+    _MAX_OUTPUT = 10_000
+    exclusive = True
+
     def __init__(
         self,
         timeout: int = 60,
@@ -20,6 +24,7 @@ class ExecTool(Tool):
         allow_patterns: list[str] | None = None,
         restrict_to_workspace: bool = False,
         path_append: str = "",
+        allowed_env_keys: list[str] | None = None,
     ):
         self.timeout = timeout
         self.working_dir = working_dir
@@ -37,6 +42,7 @@ class ExecTool(Tool):
         self.allow_patterns = allow_patterns or []
         self.restrict_to_workspace = restrict_to_workspace
         self.path_append = path_append
+        self.allowed_env_keys = allowed_env_keys or []
 
     @property
     def name(self) -> str:
@@ -58,18 +64,36 @@ class ExecTool(Tool):
                 "working_dir": {
                     "type": "string",
                     "description": "Optional working directory for the command"
-                }
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": f"Timeout in seconds (default {self.timeout}, max {self._MAX_TIMEOUT})",
+                    "minimum": 1,
+                    "maximum": self._MAX_TIMEOUT,
+                },
             },
             "required": ["command"]
         }
-    
-    async def execute(self, command: str, working_dir: str | None = None, **kwargs: Any) -> str:
+
+    def _build_env(self) -> dict[str, str]:
+        """Build env for subprocess. If allowed_env_keys set, only pass those vars."""
+        if self.allowed_env_keys:
+            env: dict[str, str] = {}
+            for key in self.allowed_env_keys:
+                val = os.environ.get(key)
+                if val is not None:
+                    env[key] = val
+            return env
+        return os.environ.copy()
+
+    async def execute(self, command: str, working_dir: str | None = None, timeout: int | None = None, **kwargs: Any) -> str:
         cwd = working_dir or self.working_dir or os.getcwd()
         guard_error = self._guard_command(command, cwd)
         if guard_error:
             return guard_error
-        
-        env = os.environ.copy()
+
+        effective_timeout = min(timeout or self.timeout, self._MAX_TIMEOUT)
+        env = self._build_env()
         if self.path_append:
             env["PATH"] = env.get("PATH", "") + os.pathsep + self.path_append
 
@@ -81,44 +105,46 @@ class ExecTool(Tool):
                 cwd=cwd,
                 env=env,
             )
-            
+
             try:
                 stdout, stderr = await asyncio.wait_for(
                     process.communicate(),
-                    timeout=self.timeout
+                    timeout=effective_timeout
                 )
             except asyncio.TimeoutError:
                 process.kill()
-                # Wait for the process to fully terminate so pipes are
-                # drained and file descriptors are released.
                 try:
                     await asyncio.wait_for(process.wait(), timeout=5.0)
                 except asyncio.TimeoutError:
                     pass
-                return f"Error: Command timed out after {self.timeout} seconds"
-            
+                return f"Error: Command timed out after {effective_timeout} seconds"
+
             output_parts = []
-            
+
             if stdout:
                 output_parts.append(stdout.decode("utf-8", errors="replace"))
-            
+
             if stderr:
                 stderr_text = stderr.decode("utf-8", errors="replace")
                 if stderr_text.strip():
                     output_parts.append(f"STDERR:\n{stderr_text}")
-            
+
             if process.returncode != 0:
                 output_parts.append(f"\nExit code: {process.returncode}")
-            
+
             result = "\n".join(output_parts) if output_parts else "(no output)"
-            
-            # Truncate very long output
-            max_len = 10000
+
+            max_len = self._MAX_OUTPUT
             if len(result) > max_len:
-                result = result[:max_len] + f"\n... (truncated, {len(result) - max_len} more chars)"
-            
+                half = max_len // 2
+                result = (
+                    result[:half]
+                    + f"\n\n... ({len(result) - max_len:,} chars truncated) ...\n\n"
+                    + result[-half:]
+                )
+
             return result
-            
+
         except Exception as e:
             return f"Error executing command: {str(e)}"
 
@@ -156,3 +182,4 @@ class ExecTool(Tool):
         win_paths = re.findall(r"[A-Za-z]:\\[^\s\"'|><;]+", command)   # Windows: C:\...
         posix_paths = re.findall(r"(?:^|[\s|>])(/[^\s\"'>]+)", command) # POSIX: /absolute only
         return win_paths + posix_paths
+

@@ -54,6 +54,12 @@ class AgentDefaults(Base):
     memory_window: int = 100
     reasoning_effort: str | None = None  # low / medium / high — enables LLM thinking mode
     tool_result_max_chars: int = 500
+    unified_session: bool = False  # Share one session across all channels (single-user multi-device)
+    disabled_skills: list[str] = Field(default_factory=list)  # Skill names to exclude from loading
+    context_window_tokens: int | None = None
+    context_block_limit: int | None = None
+    provider_retry_mode: str = "default"
+    timezone: str | None = None  # IANA timezone, e.g. "Asia/Shanghai", "America/New_York"
 
 
 class AgentsConfig(Base):
@@ -83,9 +89,12 @@ class ProvidersConfig(Base):
     zhipu: ProviderConfig = Field(default_factory=ProviderConfig)
     dashscope: ProviderConfig = Field(default_factory=ProviderConfig)  # 阿里云通义千问
     vllm: ProviderConfig = Field(default_factory=ProviderConfig)
+    ollama: ProviderConfig = Field(default_factory=ProviderConfig)  # Ollama local models
+    lm_studio: ProviderConfig = Field(default_factory=ProviderConfig)  # LM Studio local models
     gemini: ProviderConfig = Field(default_factory=ProviderConfig)
     moonshot: ProviderConfig = Field(default_factory=ProviderConfig)
     minimax: ProviderConfig = Field(default_factory=ProviderConfig)
+    mistral: ProviderConfig = Field(default_factory=ProviderConfig)
     aihubmix: ProviderConfig = Field(default_factory=ProviderConfig)  # AiHubMix API gateway
     siliconflow: ProviderConfig = Field(default_factory=ProviderConfig)  # SiliconFlow (硅基流动)
     volcengine: ProviderConfig = Field(default_factory=ProviderConfig)  # VolcEngine (火山引擎)
@@ -98,6 +107,14 @@ class HeartbeatConfig(Base):
 
     enabled: bool = True
     interval_s: int = 30 * 60  # 30 minutes
+
+
+class ApiConfig(Base):
+    """OpenAI-compatible API server configuration."""
+
+    host: str = "127.0.0.1"
+    port: int = 8080
+    timeout: int = 300
 
 
 class GatewayConfig(Base):
@@ -182,12 +199,15 @@ class ToolsConfig(Base):
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 
+
+
 class Config(BaseSettings):
     """Root configuration for mebot."""
 
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
+    api: ApiConfig | None = None
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     redis: RedisConfig = Field(default_factory=RedisConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)

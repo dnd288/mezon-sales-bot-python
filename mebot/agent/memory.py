@@ -15,6 +15,30 @@ if TYPE_CHECKING:
     from mebot.session.manager import Session
 
 
+def estimate_session_prompt_tokens(messages: list) -> int:
+    """Estimate total tokens in a list of messages (approximate).
+
+    Uses ~4 chars/token heuristic for text content. Counts tool call
+    arguments and results as well.
+    """
+    total_chars = 0
+    for msg in messages:
+        content = msg.get("content") or ""
+        if isinstance(content, str):
+            total_chars += len(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    total_chars += len(str(block.get("text") or block.get("content") or ""))
+        # Tool calls
+        for tc in msg.get("tool_calls") or []:
+            if isinstance(tc, dict):
+                func = tc.get("function") or {}
+                total_chars += len(func.get("name") or "") + len(func.get("arguments") or "")
+    # ~4 chars per token; add small fixed overhead per message
+    return total_chars // 4 + len(messages) * 4
+
+
 _SAVE_MEMORY_TOOL = [
     {
         "type": "function",

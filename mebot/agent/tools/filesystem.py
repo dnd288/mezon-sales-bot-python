@@ -1,14 +1,47 @@
 """File system tools: read, write, edit."""
 
 import difflib
+import re
 from pathlib import Path
 from typing import Any
 
 from mebot.agent.tools.base import Tool
+from mebot.agent.tools import file_state
+
+
+_BLOCKED_DEVICE_PATHS = frozenset({
+    "/dev/zero", "/dev/random", "/dev/urandom", "/dev/full",
+    "/dev/stdin", "/dev/stdout", "/dev/stderr",
+    "/dev/tty", "/dev/console",
+    "/dev/fd/0", "/dev/fd/1", "/dev/fd/2",
+})
+
+
+def _is_blocked_device(path: str | Path) -> bool:
+    """Check if path is a blocked device that could hang or produce infinite output."""
+    raw = str(path)
+
+    try:
+        resolved = str(Path(raw).resolve())
+    except (OSError, ValueError):
+        resolved = raw
+
+    if raw in _BLOCKED_DEVICE_PATHS or resolved in _BLOCKED_DEVICE_PATHS:
+        return True
+    if re.match(r"/proc/\d+/fd/[012]$", raw) or re.match(r"/proc/self/fd/[012]$", raw):
+        return True
+    if re.match(r"/proc/\d+/fd/[012]$", resolved) or re.match(r"/proc/self/fd/[012]$", resolved):
+        return True
+    if resolved.startswith("/dev/"):
+        return True
+    return False
 
 
 def _resolve_path(
-    path: str, workspace: Path | None = None, allowed_dir: Path | None = None
+    path: str,
+    workspace: Path | None = None,
+    allowed_dir: Path | None = None,
+    extra_allowed_dirs: list[Path] | None = None,
 ) -> Path:
     """Resolve path against workspace (if relative) and enforce directory restriction."""
     p = Path(path).expanduser()
@@ -16,11 +49,33 @@ def _resolve_path(
         p = workspace / p
     resolved = p.resolve()
     if allowed_dir:
-        try:
-            resolved.relative_to(allowed_dir.resolve())
-        except ValueError:
+        all_dirs = [allowed_dir.resolve()] + [d.resolve() for d in (extra_allowed_dirs or [])]
+        def _is_under(path: Path, directory: Path) -> bool:
+            try:
+                path.relative_to(directory)
+                return True
+            except ValueError:
+                return False
+        if not any(_is_under(resolved, d) for d in all_dirs):
             raise PermissionError(f"Path {path} is outside allowed directory {allowed_dir}")
     return resolved
+
+
+class _FsTool(Tool):
+    """Shared base for filesystem tools — common init and path resolution."""
+
+    def __init__(
+        self,
+        workspace: Path | None = None,
+        allowed_dir: Path | None = None,
+        extra_allowed_dirs: list[Path] | None = None,
+    ):
+        self._workspace = workspace
+        self._allowed_dir = allowed_dir
+        self._extra_allowed_dirs = extra_allowed_dirs
+
+    def _resolve(self, path: str) -> Path:
+        return _resolve_path(path, self._workspace, self._allowed_dir, self._extra_allowed_dirs)
 
 
 class ReadFileTool(Tool):
@@ -28,9 +83,15 @@ class ReadFileTool(Tool):
 
     _MAX_CHARS = 128_000  # ~128 KB — prevents OOM from reading huge files into LLM context
 
-    def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
+    def __init__(
+        self,
+        workspace: Path | None = None,
+        allowed_dir: Path | None = None,
+        extra_allowed_dirs: list[Path] | None = None,
+    ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
+        self._extra_allowed_dirs = extra_allowed_dirs
 
     @property
     def name(self) -> str:
@@ -50,7 +111,15 @@ class ReadFileTool(Tool):
 
     async def execute(self, path: str, **kwargs: Any) -> str:
         try:
-            file_path = _resolve_path(path, self._workspace, self._allowed_dir)
+            # Device path blacklist
+            if _is_blocked_device(path):
+                return f"Error: Reading {path} is blocked (device path that could hang or produce infinite output)."
+
+            file_path = _resolve_path(path, self._workspace, self._allowed_dir, self._extra_allowed_dirs)
+
+            if _is_blocked_device(file_path):
+                return f"Error: Reading {file_path} is blocked (device path that could hang or produce infinite output)."
+
             if not file_path.exists():
                 return f"Error: File not found: {path}"
             if not file_path.is_file():
@@ -64,6 +133,7 @@ class ReadFileTool(Tool):
                 )
 
             content = file_path.read_text(encoding="utf-8")
+            file_state.record_read(file_path)
             if len(content) > self._MAX_CHARS:
                 return content[: self._MAX_CHARS] + f"\n\n... (truncated — file is {len(content):,} chars, limit {self._MAX_CHARS:,})"
             return content
@@ -76,9 +146,15 @@ class ReadFileTool(Tool):
 class WriteFileTool(Tool):
     """Tool to write content to a file."""
 
-    def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
+    def __init__(
+        self,
+        workspace: Path | None = None,
+        allowed_dir: Path | None = None,
+        extra_allowed_dirs: list[Path] | None = None,
+    ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
+        self._extra_allowed_dirs = extra_allowed_dirs
 
     @property
     def name(self) -> str:
@@ -101,9 +177,10 @@ class WriteFileTool(Tool):
 
     async def execute(self, path: str, content: str, **kwargs: Any) -> str:
         try:
-            file_path = _resolve_path(path, self._workspace, self._allowed_dir)
+            file_path = _resolve_path(path, self._workspace, self._allowed_dir, self._extra_allowed_dirs)
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(content, encoding="utf-8")
+            file_state.record_write(file_path)
             return f"Successfully wrote {len(content)} bytes to {file_path}"
         except PermissionError as e:
             return f"Error: {e}"
@@ -114,9 +191,15 @@ class WriteFileTool(Tool):
 class EditFileTool(Tool):
     """Tool to edit a file by replacing text."""
 
-    def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
+    def __init__(
+        self,
+        workspace: Path | None = None,
+        allowed_dir: Path | None = None,
+        extra_allowed_dirs: list[Path] | None = None,
+    ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
+        self._extra_allowed_dirs = extra_allowed_dirs
 
     @property
     def name(self) -> str:
@@ -140,9 +223,12 @@ class EditFileTool(Tool):
 
     async def execute(self, path: str, old_text: str, new_text: str, **kwargs: Any) -> str:
         try:
-            file_path = _resolve_path(path, self._workspace, self._allowed_dir)
+            file_path = _resolve_path(path, self._workspace, self._allowed_dir, self._extra_allowed_dirs)
             if not file_path.exists():
                 return f"Error: File not found: {path}"
+
+            # Read-before-edit check
+            warning = file_state.check_read(file_path)
 
             content = file_path.read_text(encoding="utf-8")
 
@@ -156,8 +242,12 @@ class EditFileTool(Tool):
 
             new_content = content.replace(old_text, new_text, 1)
             file_path.write_text(new_content, encoding="utf-8")
+            file_state.record_write(file_path)
 
-            return f"Successfully edited {file_path}"
+            msg = f"Successfully edited {file_path}"
+            if warning:
+                msg = f"{warning}\n{msg}"
+            return msg
         except PermissionError as e:
             return f"Error: {e}"
         except Exception as e:
@@ -195,9 +285,21 @@ class EditFileTool(Tool):
 class ListDirTool(Tool):
     """Tool to list directory contents."""
 
-    def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
+    _IGNORE_DIRS = {
+        ".git", "node_modules", "__pycache__", ".venv", "venv",
+        "dist", "build", ".tox", ".mypy_cache", ".pytest_cache",
+        ".ruff_cache", ".coverage", "htmlcov",
+    }
+
+    def __init__(
+        self,
+        workspace: Path | None = None,
+        allowed_dir: Path | None = None,
+        extra_allowed_dirs: list[Path] | None = None,
+    ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
+        self._extra_allowed_dirs = extra_allowed_dirs
 
     @property
     def name(self) -> str:
@@ -217,7 +319,7 @@ class ListDirTool(Tool):
 
     async def execute(self, path: str, **kwargs: Any) -> str:
         try:
-            dir_path = _resolve_path(path, self._workspace, self._allowed_dir)
+            dir_path = _resolve_path(path, self._workspace, self._allowed_dir, self._extra_allowed_dirs)
             if not dir_path.exists():
                 return f"Error: Directory not found: {path}"
             if not dir_path.is_dir():

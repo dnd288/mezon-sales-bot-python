@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -13,23 +14,31 @@ from loguru import logger
 
 from mebot.agent.config import AgentConfig
 from mebot.agent.context import ContextBuilder
+from mebot.agent.hook import AgentHook
 from mebot.agent.memory import MemoryStore
 from mebot.agent.subagent import SubagentManager
 from mebot.agent.tools.cron import CronTool
 from mebot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from mebot.agent.tools.message import MessageTool
+from mebot.agent.tools.notebook import NotebookEditTool
 from mebot.agent.tools.registry import ToolRegistry
+from mebot.agent.tools.search import GlobTool, GrepTool
 from mebot.agent.tools.shell import ExecTool
 from mebot.agent.tools.spawn import SpawnTool
 from mebot.agent.tools.web import WebFetchTool, WebSearchTool
 from mebot.bus.events import InboundMessage, OutboundMessage
 from mebot.bus.queue import MessageBus
+from mebot.command.builtin import register_builtin_commands
+from mebot.command.router import CommandContext, CommandRouter
 from mebot.providers.base import LLMProvider
 from mebot.session.manager import Session, SessionManager, SessionStore
 
 if TYPE_CHECKING:
     from mebot.config.schema import ChannelsConfig
     from mebot.cron.service import CronService
+
+
+UNIFIED_SESSION_KEY = "unified:default"
 
 
 class AgentLoop:
@@ -67,6 +76,13 @@ class AgentLoop:
         cron_service: CronService | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
+        # New nanobot-inspired params
+        disabled_skills: list[str] | None = None,
+        unified_session: bool = False,
+        hooks: list[AgentHook] | None = None,
+        context_window_tokens: int | None = None,
+        context_block_limit: int | None = None,
+        provider_retry_mode: str = "default",
     ):
         if config is None:
             from mebot.config.schema import ExecToolConfig
@@ -106,7 +122,7 @@ class AgentLoop:
         self.restrict_to_workspace = config.restrict_to_workspace
         self.tool_result_max_chars = config.tool_result_max_chars
 
-        self.context = ContextBuilder(self.workspace)
+        self.context = ContextBuilder(self.workspace, disabled_skills=disabled_skills)
         self.sessions = session_manager or SessionManager(self.workspace)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
@@ -124,6 +140,13 @@ class AgentLoop:
         )
 
         self._running = False
+        self._unified_session = unified_session
+        self._extra_hooks: list[AgentHook] = hooks or []
+        self.context_window_tokens = context_window_tokens
+        self.context_block_limit = context_block_limit
+        self.provider_retry_mode = provider_retry_mode
+        self._start_time = time.time()
+        self._last_usage: dict[str, int] = {}
         self._mcp_servers = dict(config.mcp_servers)
         self._mcp_stack: AsyncExitStack | None = None
         self._mcp_connected = False
@@ -135,6 +158,8 @@ class AgentLoop:
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._processing_lock = asyncio.Lock()
         self._register_default_tools()
+        self.commands = CommandRouter()
+        register_builtin_commands(self.commands)
 
     def _acquire_consolidation_lock(self, session_key: str) -> asyncio.Lock:
         """Return a per-session consolidation lock and keep a strong reference while in use."""
@@ -159,6 +184,9 @@ class AgentLoop:
         allowed_dir = self.workspace if self.restrict_to_workspace else None
         for cls in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool):
             self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir))
+        for cls in (GlobTool, GrepTool):
+            self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir))
+        self.tools.register(NotebookEditTool(workspace=self.workspace, allowed_dir=allowed_dir))
         self.tools.register(ExecTool(
             working_dir=str(self.workspace),
             timeout=self.exec_config.timeout,
@@ -193,6 +221,12 @@ class AgentLoop:
                 self._mcp_stack = None
         finally:
             self._mcp_connecting = False
+
+    def _effective_session_key(self, msg: InboundMessage) -> str:
+        """Return the session key used for task routing."""
+        if self._unified_session:
+            return UNIFIED_SESSION_KEY
+        return msg.session_key
 
     def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
         """Update context for all tools that need routing info."""
@@ -310,12 +344,25 @@ class AgentLoop:
             except asyncio.TimeoutError:
                 continue
 
-            if msg.content.strip().lower() == "/stop":
+            raw = msg.content.strip()
+            if raw.lower() == "/stop":
                 await self._handle_stop(msg)
-            else:
-                task = asyncio.create_task(self._dispatch(msg))
-                self._active_tasks.setdefault(msg.session_key, []).append(task)
-                task.add_done_callback(lambda t, k=msg.session_key: self._active_tasks.get(k, []) and self._active_tasks[k].remove(t) if t in self._active_tasks.get(k, []) else None)
+                continue
+
+            # Route slash commands through CommandRouter before LLM
+            if raw.startswith("/"):
+                effective_key = self._effective_session_key(msg)
+                session = self.sessions.get_or_create(effective_key)
+                ctx = CommandContext(msg=msg, session=session, key=effective_key, raw=raw, loop=self)
+                result = await self.commands.dispatch(ctx)
+                if result is not None:
+                    await self.bus.publish_outbound(result)
+                    continue
+
+            effective_key = self._effective_session_key(msg)
+            task = asyncio.create_task(self._dispatch(msg))
+            self._active_tasks.setdefault(effective_key, []).append(task)
+            task.add_done_callback(lambda t, k=effective_key: self._active_tasks.get(k, []) and self._active_tasks[k].remove(t) if t in self._active_tasks.get(k, []) else None)
 
     async def _handle_stop(self, msg: InboundMessage) -> None:
         """Cancel all active tasks and subagents for the session."""

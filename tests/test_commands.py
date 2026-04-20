@@ -143,12 +143,12 @@ def mock_agent_runtime(tmp_path):
 
     with patch("mebot.config.loader.load_config", return_value=config) as mock_load_config, \
          patch("mebot.config.paths.get_cron_dir", return_value=cron_dir), \
-         patch("mebot.cli.commands.sync_workspace_templates") as mock_sync_templates, \
-         patch("mebot.cli.commands._make_provider", return_value=object()), \
-         patch("mebot.cli.commands._print_agent_response") as mock_print_response, \
+         patch("mebot.cli.agent_cmd.sync_workspace_templates") as mock_sync_templates, \
+         patch("mebot.cli.agent_cmd._make_provider", return_value=object()), \
+         patch("mebot.cli.agent_cmd._print_agent_response") as mock_print_response, \
          patch("mebot.bus.queue.MessageBus"), \
          patch("mebot.cron.service.CronService"), \
-         patch("mebot.agent.loop.AgentLoop") as mock_agent_loop_cls:
+         patch("mebot.cli.agent_cmd.AgentLoop") as mock_agent_loop_cls:
 
         agent_loop = MagicMock()
         agent_loop.channels_config = None
@@ -184,7 +184,7 @@ def test_agent_uses_default_config_when_no_workspace_or_config_flags(mock_agent_
     assert mock_agent_runtime["sync_templates"].call_args.args == (
         mock_agent_runtime["config"].workspace_path,
     )
-    assert mock_agent_runtime["agent_loop_cls"].call_args.kwargs["workspace"] == (
+    assert mock_agent_runtime["agent_loop_cls"].call_args.kwargs["config"].workspace == (
         mock_agent_runtime["config"].workspace_path
     )
     mock_agent_runtime["agent_loop"].process_direct.assert_awaited_once()
@@ -215,8 +215,8 @@ def test_agent_config_sets_active_path(monkeypatch, tmp_path: Path) -> None:
     )
     monkeypatch.setattr("mebot.config.loader.load_config", lambda _path=None: config)
     monkeypatch.setattr("mebot.config.paths.get_cron_dir", lambda: config_file.parent / "cron")
-    monkeypatch.setattr("mebot.cli.commands.sync_workspace_templates", lambda _path: None)
-    monkeypatch.setattr("mebot.cli.commands._make_provider", lambda _config: object())
+    monkeypatch.setattr("mebot.cli.agent_cmd.sync_workspace_templates", lambda _path: None)
+    monkeypatch.setattr("mebot.cli.agent_cmd._make_provider", lambda _config: object())
     monkeypatch.setattr("mebot.bus.queue.MessageBus", lambda: object())
     monkeypatch.setattr("mebot.cron.service.CronService", lambda _store: object())
 
@@ -230,8 +230,8 @@ def test_agent_config_sets_active_path(monkeypatch, tmp_path: Path) -> None:
         async def close_mcp(self) -> None:
             return None
 
-    monkeypatch.setattr("mebot.agent.loop.AgentLoop", _FakeAgentLoop)
-    monkeypatch.setattr("mebot.cli.commands._print_agent_response", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("mebot.cli.agent_cmd.AgentLoop", _FakeAgentLoop)
+    monkeypatch.setattr("mebot.cli.agent_cmd._print_agent_response", lambda *_args, **_kwargs: None)
 
     result = runner.invoke(app, ["agent", "-m", "hello", "-c", str(config_file)])
 
@@ -247,7 +247,7 @@ def test_agent_overrides_workspace_path(mock_agent_runtime):
     assert result.exit_code == 0
     assert mock_agent_runtime["config"].agents.defaults.workspace == str(workspace_path)
     assert mock_agent_runtime["sync_templates"].call_args.args == (workspace_path,)
-    assert mock_agent_runtime["agent_loop_cls"].call_args.kwargs["workspace"] == workspace_path
+    assert mock_agent_runtime["agent_loop_cls"].call_args.kwargs["config"].workspace == workspace_path
 
 
 def test_agent_workspace_override_wins_over_config_workspace(mock_agent_runtime, tmp_path: Path):
@@ -264,7 +264,7 @@ def test_agent_workspace_override_wins_over_config_workspace(mock_agent_runtime,
     assert mock_agent_runtime["load_config"].call_args.args == (config_path.resolve(),)
     assert mock_agent_runtime["config"].agents.defaults.workspace == str(workspace_path)
     assert mock_agent_runtime["sync_templates"].call_args.args == (workspace_path,)
-    assert mock_agent_runtime["agent_loop_cls"].call_args.kwargs["workspace"] == workspace_path
+    assert mock_agent_runtime["agent_loop_cls"].call_args.kwargs["config"].workspace == workspace_path
 
 
 def test_gateway_uses_workspace_from_config_by_default(monkeypatch, tmp_path: Path) -> None:
@@ -282,11 +282,11 @@ def test_gateway_uses_workspace_from_config_by_default(monkeypatch, tmp_path: Pa
     )
     monkeypatch.setattr("mebot.config.loader.load_config", lambda _path=None: config)
     monkeypatch.setattr(
-        "mebot.cli.commands.sync_workspace_templates",
+        "mebot.cli.gateway.sync_workspace_templates",
         lambda path: seen.__setitem__("workspace", path),
     )
     monkeypatch.setattr(
-        "mebot.cli.commands._make_provider",
+        "mebot.cli.gateway._make_provider",
         lambda _config: (_ for _ in ()).throw(_StopGateway("stop")),
     )
 
@@ -310,11 +310,11 @@ def test_gateway_workspace_option_overrides_config(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr("mebot.config.loader.set_config_path", lambda _path: None)
     monkeypatch.setattr("mebot.config.loader.load_config", lambda _path=None: config)
     monkeypatch.setattr(
-        "mebot.cli.commands.sync_workspace_templates",
+        "mebot.cli.gateway.sync_workspace_templates",
         lambda path: seen.__setitem__("workspace", path),
     )
     monkeypatch.setattr(
-        "mebot.cli.commands._make_provider",
+        "mebot.cli.gateway._make_provider",
         lambda _config: (_ for _ in ()).throw(_StopGateway("stop")),
     )
 
@@ -339,8 +339,9 @@ def test_gateway_uses_config_directory_for_cron_store(monkeypatch, tmp_path: Pat
     monkeypatch.setattr("mebot.config.loader.set_config_path", lambda _path: None)
     monkeypatch.setattr("mebot.config.loader.load_config", lambda _path=None: config)
     monkeypatch.setattr("mebot.config.paths.get_cron_dir", lambda: config_file.parent / "cron")
-    monkeypatch.setattr("mebot.cli.commands.sync_workspace_templates", lambda _path: None)
-    monkeypatch.setattr("mebot.cli.commands._make_provider", lambda _config: object())
+    monkeypatch.setattr("mebot.cli.gateway.get_cron_dir", lambda: config_file.parent / "cron")
+    monkeypatch.setattr("mebot.cli.gateway.sync_workspace_templates", lambda _path: None)
+    monkeypatch.setattr("mebot.cli.gateway._make_provider", lambda _config: object())
     monkeypatch.setattr("mebot.bus.queue.MessageBus", lambda: object())
     monkeypatch.setattr("mebot.session.manager.SessionManager", lambda _workspace: object())
 
@@ -350,6 +351,7 @@ def test_gateway_uses_config_directory_for_cron_store(monkeypatch, tmp_path: Pat
             raise _StopGateway("stop")
 
     monkeypatch.setattr("mebot.cron.service.CronService", _StopCron)
+    monkeypatch.setattr("mebot.cli.gateway.CronService", _StopCron)
 
     result = runner.invoke(app, ["gateway", "--config", str(config_file)])
 
@@ -367,9 +369,9 @@ def test_gateway_uses_configured_port_when_cli_flag_is_missing(monkeypatch, tmp_
 
     monkeypatch.setattr("mebot.config.loader.set_config_path", lambda _path: None)
     monkeypatch.setattr("mebot.config.loader.load_config", lambda _path=None: config)
-    monkeypatch.setattr("mebot.cli.commands.sync_workspace_templates", lambda _path: None)
+    monkeypatch.setattr("mebot.cli.gateway.sync_workspace_templates", lambda _path: None)
     monkeypatch.setattr(
-        "mebot.cli.commands._make_provider",
+        "mebot.cli.gateway._make_provider",
         lambda _config: (_ for _ in ()).throw(_StopGateway("stop")),
     )
 
@@ -389,9 +391,9 @@ def test_gateway_cli_port_overrides_configured_port(monkeypatch, tmp_path: Path)
 
     monkeypatch.setattr("mebot.config.loader.set_config_path", lambda _path: None)
     monkeypatch.setattr("mebot.config.loader.load_config", lambda _path=None: config)
-    monkeypatch.setattr("mebot.cli.commands.sync_workspace_templates", lambda _path: None)
+    monkeypatch.setattr("mebot.cli.gateway.sync_workspace_templates", lambda _path: None)
     monkeypatch.setattr(
-        "mebot.cli.commands._make_provider",
+        "mebot.cli.gateway._make_provider",
         lambda _config: (_ for _ in ()).throw(_StopGateway("stop")),
     )
 

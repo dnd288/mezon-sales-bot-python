@@ -6,8 +6,16 @@ import re
 import shutil
 from pathlib import Path
 
+import yaml
+
 # Default builtin skills directory (relative to this file)
 BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
+
+# Strip YAML frontmatter (opening ---, YAML body, closing --- on its own line; supports CRLF)
+_STRIP_SKILL_FRONTMATTER = re.compile(
+    r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n?",
+    re.DOTALL,
+)
 
 
 class SkillsLoader:
@@ -18,10 +26,27 @@ class SkillsLoader:
     specific tools or perform certain tasks.
     """
 
-    def __init__(self, workspace: Path, builtin_skills_dir: Path | None = None):
+    def __init__(self, workspace: Path, builtin_skills_dir: Path | None = None, disabled_skills: set[str] | None = None):
         self.workspace = workspace
         self.workspace_skills = workspace / "skills"
         self.builtin_skills = builtin_skills_dir or BUILTIN_SKILLS_DIR
+        self.disabled_skills = disabled_skills or set()
+
+    def _skill_entries_from_dir(self, base: Path, source: str, *, skip_names: set[str] | None = None) -> list[dict[str, str]]:
+        if not base.exists():
+            return []
+        entries: list[dict[str, str]] = []
+        for skill_dir in base.iterdir():
+            if not skill_dir.is_dir():
+                continue
+            skill_file = skill_dir / "SKILL.md"
+            if not skill_file.exists():
+                continue
+            name = skill_dir.name
+            if skip_names is not None and name in skip_names:
+                continue
+            entries.append({"name": name, "path": str(skill_file), "source": source})
+        return entries
 
     def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, str]]:
         """
@@ -33,23 +58,18 @@ class SkillsLoader:
         Returns:
             List of skill info dicts with 'name', 'path', 'source'.
         """
-        skills = []
+        skills = self._skill_entries_from_dir(self.workspace_skills, "workspace")
+        workspace_names = {entry["name"] for entry in skills}
 
-        # Workspace skills (highest priority)
-        if self.workspace_skills.exists():
-            for skill_dir in self.workspace_skills.iterdir():
-                if skill_dir.is_dir():
-                    skill_file = skill_dir / "SKILL.md"
-                    if skill_file.exists():
-                        skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "workspace"})
-
-        # Built-in skills
+        # Built-in skills (skip names already from workspace)
         if self.builtin_skills and self.builtin_skills.exists():
-            for skill_dir in self.builtin_skills.iterdir():
-                if skill_dir.is_dir():
-                    skill_file = skill_dir / "SKILL.md"
-                    if skill_file.exists() and not any(s["name"] == skill_dir.name for s in skills):
-                        skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "builtin"})
+            skills.extend(
+                self._skill_entries_from_dir(self.builtin_skills, "builtin", skip_names=workspace_names)
+            )
+
+        # Filter disabled skills
+        if self.disabled_skills:
+            skills = [s for s in skills if s["name"] not in self.disabled_skills]
 
         # Filter by requirements
         if filter_unavailable:
@@ -160,19 +180,30 @@ class SkillsLoader:
 
     def _strip_frontmatter(self, content: str) -> str:
         """Remove YAML frontmatter from markdown content."""
-        if content.startswith("---"):
-            match = re.match(r"^---\n.*?\n---\n", content, re.DOTALL)
-            if match:
-                return content[match.end():].strip()
+        if not content.startswith("---"):
+            return content
+        match = _STRIP_SKILL_FRONTMATTER.match(content)
+        if match:
+            return content[match.end():].strip()
         return content
 
-    def _parse_mebot_metadata(self, raw: str) -> dict:
-        """Parse skill metadata JSON from frontmatter (supports mebot and openclaw keys)."""
-        try:
-            data = json.loads(raw)
-            return data.get("mebot", data.get("openclaw", {})) if isinstance(data, dict) else {}
-        except (json.JSONDecodeError, TypeError):
+    def _parse_mebot_metadata(self, raw: object) -> dict:
+        """Parse skill metadata from frontmatter (supports mebot, nanobot and openclaw keys).
+
+        ``raw`` may be a dict (already parsed by yaml.safe_load) or a JSON str.
+        """
+        if isinstance(raw, dict):
+            data = raw
+        elif isinstance(raw, str):
+            try:
+                data = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                return {}
+        else:
             return {}
+        if not isinstance(data, dict):
+            return {}
+        return data.get("mebot", data.get("nanobot", data.get("openclaw", {}))) or {}
 
     def _check_requirements(self, skill_meta: dict) -> bool:
         """Check if skill requirements are met (bins, env vars)."""
@@ -211,18 +242,18 @@ class SkillsLoader:
             Metadata dict or None.
         """
         content = self.load_skill(name)
-        if not content:
+        if not content or not content.startswith("---"):
             return None
-
-        if content.startswith("---"):
-            match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
-            if match:
-                # Simple YAML parsing
-                metadata = {}
-                for line in match.group(1).split("\n"):
-                    if ":" in line:
-                        key, value = line.split(":", 1)
-                        metadata[key.strip()] = value.strip().strip('"\'')
-                return metadata
-
-        return None
+        match = _STRIP_SKILL_FRONTMATTER.match(content)
+        if not match:
+            return None
+        try:
+            parsed = yaml.safe_load(match.group(1))
+        except yaml.YAMLError:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        metadata: dict[str, object] = {}
+        for key, value in parsed.items():
+            metadata[str(key)] = value
+        return metadata
