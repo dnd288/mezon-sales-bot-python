@@ -203,9 +203,14 @@ class MezonChannel:
                     await user.send_dm_message(ChannelMessageContent(t=chunk))
             else:
                 channel = await self._client.channels.fetch(int(msg.chat_id))
+                # Thread reply when thread_ts is set (task events reply to originating thread).
+                thread_kwargs: dict = {}
+                thread_ts = (msg.metadata or {}).get("thread_ts")
+                if thread_ts:
+                    thread_kwargs["thread_ts"] = thread_ts
                 for chunk in split_message(msg.content):
                     logger.debug("Sending message to channel_id={}: {}...", msg.chat_id, chunk[:60])
-                    await channel.send(content=ChannelMessageContent(t=chunk))
+                    await channel.send(content=ChannelMessageContent(t=chunk), **thread_kwargs)
         except Exception as exc:
             logger.error("Error sending Mezon message to {}: {}", msg.chat_id, exc)
 
