@@ -134,9 +134,71 @@ def build_help_text() -> str:
         "/stop — Stop the current task",
         "/restart — Restart the bot",
         "/status — Show bot status",
+        "/history [n] — Show the last N conversation messages (default 10)",
         "/help — Show available commands",
     ]
     return "\n".join(lines)
+
+
+_HISTORY_DEFAULT_COUNT = 10
+_HISTORY_MAX_COUNT = 50
+
+
+def _format_history_message(msg: dict) -> str | None:
+    """Format a single history message for display."""
+    role = msg.get("role", "")
+    if role == "system":
+        return None
+    content = msg.get("content", "")
+    if isinstance(content, list):
+        text_parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+        content = " ".join(text_parts).strip()
+    if not content:
+        return None
+    prefix = "👤 User: " if role == "user" else "🤖 Assistant: "
+    lines = content.split("\n")
+    if len(lines) > 3:
+        content = "\n".join(lines[:3]) + "\n..."
+    if len(content) > 500:
+        content = content[:500] + "..."
+    return f"{prefix}{content}"
+
+
+async def cmd_history(ctx: CommandContext) -> OutboundMessage:
+    """Show recent conversation history.
+
+    Usage: /history [count]
+    """
+    count = _HISTORY_DEFAULT_COUNT
+    if ctx.args.strip():
+        try:
+            count = max(1, min(int(ctx.args.strip()), _HISTORY_MAX_COUNT))
+        except ValueError:
+            return OutboundMessage(
+                channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
+                content="Usage: /history [count] — e.g. /history 5 (default: 10, max: 50)",
+                metadata=dict(ctx.msg.metadata or {}),
+            )
+
+    session = ctx.session or ctx.loop.sessions.get_or_create(ctx.key)
+    history = session.get_history(max_messages=0)
+    visible = [_format_history_message(m) for m in history]
+    visible = [m for m in visible if m is not None]
+    recent = visible[-count:]
+
+    if not recent:
+        return OutboundMessage(
+            channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
+            content="No conversation history yet.",
+            metadata=dict(ctx.msg.metadata or {}),
+        )
+
+    header = f"Last {len(recent)} message(s):\n"
+    return OutboundMessage(
+        channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
+        content=header + "\n".join(recent),
+        metadata={**dict(ctx.msg.metadata or {}), "render_as": "text"},
+    )
 
 
 def register_builtin_commands(router: CommandRouter) -> None:
@@ -147,3 +209,5 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.exact("/new", cmd_new)
     router.exact("/status", cmd_status)
     router.exact("/help", cmd_help)
+    router.exact("/history", cmd_history)
+    router.prefix("/history ", cmd_history)

@@ -93,8 +93,27 @@ class AgentRunResult:
 class AgentRunner:
     """Run a tool-capable LLM loop without product-layer concerns."""
 
+    # Markers identifying tool results that represent a workspace / safety boundary rejection.
+    _WORKSPACE_BLOCK_MARKERS: tuple[str, ...] = (
+        "blocked by safety guard",
+        "outside the configured workspace",
+        "outside allowed directory",
+        "working_dir is outside",
+        "working_dir could not be resolved",
+        "path traversal detected",
+        "path outside working dir",
+    )
+
     def __init__(self, provider: LLMProvider):
         self.provider = provider
+
+    @classmethod
+    def _is_workspace_violation(cls, text: str) -> bool:
+        """Check if text contains workspace/safety violation markers."""
+        if not text:
+            return False
+        lowered = text.lower()
+        return any(marker in lowered for marker in cls._WORKSPACE_BLOCK_MARKERS)
 
     @staticmethod
     def _merge_message_content(left: Any, right: Any) -> str | list[dict[str, Any]]:
@@ -683,6 +702,15 @@ class AgentRunner:
                 "status": "error",
                 "detail": prep_error.split(": ", 1)[-1][:120],
             }
+            if self._is_workspace_violation(prep_error):
+                logger.warning(
+                    "Tool {} blocked by workspace/safety guard during preparation; aborting turn: {}",
+                    tool_call.name,
+                    prep_error.replace("\n", " ").strip()[:200],
+                )
+                event["detail"] = ("workspace_violation: "
+                                   + prep_error.replace("\n", " ").strip())[:160]
+                return prep_error, event, RuntimeError(prep_error)
             return prep_error + _HINT, event, RuntimeError(prep_error) if spec.fail_on_tool_error else None
         try:
             if tool is not None:
@@ -697,6 +725,15 @@ class AgentRunner:
                 "status": "error",
                 "detail": str(exc),
             }
+            if self._is_workspace_violation(str(exc)):
+                logger.warning(
+                    "Tool {} blocked by workspace/safety guard; aborting turn: {}",
+                    tool_call.name,
+                    str(exc).replace("\n", " ").strip()[:200],
+                )
+                event["detail"] = ("workspace_violation: "
+                                   + str(exc).replace("\n", " ").strip())[:160]
+                return f"Error: {type(exc).__name__}: {exc}", event, exc
             if spec.fail_on_tool_error:
                 return f"Error: {type(exc).__name__}: {exc}", event, exc
             return f"Error: {type(exc).__name__}: {exc}", event, None
@@ -707,6 +744,15 @@ class AgentRunner:
                 "status": "error",
                 "detail": result.replace("\n", " ").strip()[:120],
             }
+            if self._is_workspace_violation(result):
+                logger.warning(
+                    "Tool {} blocked by workspace/safety guard; aborting turn: {}",
+                    tool_call.name,
+                    result.replace("\n", " ").strip()[:200],
+                )
+                event["detail"] = ("workspace_violation: "
+                                   + result.replace("\n", " ").strip())[:160]
+                return result, event, RuntimeError(result)
             if spec.fail_on_tool_error:
                 return result + _HINT, event, RuntimeError(result)
             return result + _HINT, event, None

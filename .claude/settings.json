@@ -9,7 +9,31 @@
       "Bash(git config:*)",
       "Bash(python3 -c \"import sys; print\\(''''\\\\n''''.join\\(sys.path\\)\\)\")",
       "Bash(gh api:*)",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Bash(python -m pytest tests/test_redis_session_manager.py -v)",
+      "Bash(python3 -m pytest tests/test_redis_session_manager.py -v)",
+      "Bash(ls .venv/bin/python*)",
+      "Bash(uv run:*)",
+      "Bash(.venv/bin/python -m pytest tests/test_redis_session_manager.py -v)",
+      "Bash(.venv/bin/python -c \"import pytest; print\\(pytest.__file__\\)\")",
+      "Bash(.venv/bin/pip install:*)",
+      "Bash(uv pip:*)",
+      "Bash(git checkout:*)",
+      "Bash(source .venv/bin/activate)",
+      "Bash(mebot status:*)",
+      "WebFetch(domain:mezon.ai)",
+      "Bash(pip install:*)",
+      "Bash(pip3 install:*)",
+      "Bash(.venv/bin/python3 -m pip install \"mezon-sdk>=1.6.21\")",
+      "Bash(.venv/bin/python3 -m uv pip install \"mezon-sdk>=1.6.21\")",
+      "Bash(gh pr create --title 'Refactor agent runtime, CLI structure, and Redis bridge' --body ' *)",
+      "Bash(gh pr create --head codex/refactor-plan-implementation --base main --title 'Refactor agent runtime, CLI structure, and Redis bridge' --body ' *)",
+      "Bash(gh pr create --head dnd288:codex/refactor-plan-implementation --base main --title 'Refactor agent runtime, CLI structure, and Redis bridge' --body ' *)",
+      "Bash(gh pr *)",
+      "Bash(git fetch *)"
+    ],
+    "additionalDirectories": [
+      "/Users/mrdnd/src/mezon/mezon-sales-bot-python/docs"
     ]
   }
 }
